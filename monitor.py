@@ -58,58 +58,70 @@ COST_TABLE: dict[str, dict[str, float]] = {
 }
 
 # Subscription plan usage limits (estimated from published caps).
+# Each model within a plan has its own separate usage allowance.
+# Heavier models (Opus, Sol) consume more compute per message, so limits are lower.
 # Providers limit by messages, not tokens. We estimate tokens per message
 # to derive a token budget per rolling window, then show % consumed.
-# Avg tokens/msg: ~500 (mixed short/medium conversations).
-# Window: the rolling period before limits reset.
 SUBSCRIPTION_LIMITS: dict[str, dict] = {
     "ChatGPT Plus ($20/mo)": {
         "provider": "OpenAI",
         "price_monthly": 20,
         "window_hours": 3,
-        "messages_per_window": 160,
-        "tokens_per_msg": 500,
-        "models": ["GPT-5.6 Sol", "GPT-5.6 Terra", "GPT-5.6 Luna"],
+        "models": {
+            "GPT-5.6 Sol":   {"messages": 80,  "tokens_per_msg": 800},   # flagship, tighter limit
+            "GPT-5.6 Terra": {"messages": 160, "tokens_per_msg": 500},   # balanced
+            "GPT-5.6 Luna":  {"messages": 300, "tokens_per_msg": 300},   # fast, generous
+        },
     },
     "ChatGPT Pro ($100/mo)": {
         "provider": "OpenAI",
         "price_monthly": 100,
         "window_hours": 3,
-        "messages_per_window": 800,  # 5x Plus
-        "tokens_per_msg": 500,
-        "models": ["GPT-5.6 Sol", "GPT-5.6 Terra", "GPT-5.6 Luna"],
+        "models": {
+            "GPT-5.6 Sol":   {"messages": 400,  "tokens_per_msg": 800},
+            "GPT-5.6 Terra": {"messages": 800,  "tokens_per_msg": 500},
+            "GPT-5.6 Luna":  {"messages": 1500, "tokens_per_msg": 300},
+        },
     },
     "ChatGPT Pro ($200/mo)": {
         "provider": "OpenAI",
         "price_monthly": 200,
         "window_hours": 3,
-        "messages_per_window": 3200,  # 20x Plus
-        "tokens_per_msg": 500,
-        "models": ["GPT-5.6 Sol", "GPT-5.6 Terra", "GPT-5.6 Luna"],
+        "models": {
+            "GPT-5.6 Sol":   {"messages": 1600, "tokens_per_msg": 800},
+            "GPT-5.6 Terra": {"messages": 3200, "tokens_per_msg": 500},
+            "GPT-5.6 Luna":  {"messages": 6000, "tokens_per_msg": 300},
+        },
     },
     "Claude Pro ($20/mo)": {
         "provider": "Anthropic",
         "price_monthly": 20,
         "window_hours": 5,
-        "messages_per_window": 45,
-        "tokens_per_msg": 1000,  # longer avg context with Claude
-        "models": ["Claude Sonnet 5", "Claude Opus 5", "Claude Fable 5"],
+        "models": {
+            "Claude Fable 5":  {"messages": 15,  "tokens_per_msg": 1500},  # heaviest, fewest
+            "Claude Opus 5":   {"messages": 30,  "tokens_per_msg": 1200},  # heavy reasoning
+            "Claude Sonnet 5": {"messages": 45,  "tokens_per_msg": 800},   # balanced
+        },
     },
     "Claude Max ($100/mo)": {
         "provider": "Anthropic",
         "price_monthly": 100,
         "window_hours": 5,
-        "messages_per_window": 225,  # 5x Pro
-        "tokens_per_msg": 1000,
-        "models": ["Claude Sonnet 5", "Claude Opus 5", "Claude Fable 5"],
+        "models": {
+            "Claude Fable 5":  {"messages": 75,  "tokens_per_msg": 1500},
+            "Claude Opus 5":   {"messages": 150, "tokens_per_msg": 1200},
+            "Claude Sonnet 5": {"messages": 225, "tokens_per_msg": 800},
+        },
     },
     "Claude Max ($200/mo)": {
         "provider": "Anthropic",
         "price_monthly": 200,
         "window_hours": 5,
-        "messages_per_window": 900,  # 20x Pro
-        "tokens_per_msg": 1000,
-        "models": ["Claude Sonnet 5", "Claude Opus 5", "Claude Fable 5"],
+        "models": {
+            "Claude Fable 5":  {"messages": 300, "tokens_per_msg": 1500},
+            "Claude Opus 5":   {"messages": 600, "tokens_per_msg": 1200},
+            "Claude Sonnet 5": {"messages": 900, "tokens_per_msg": 800},
+        },
     },
 }
 
@@ -119,20 +131,16 @@ def compute_subscription_usage(total_prompt: int, total_gen: int, uptime_s: floa
                                 tokens_gen_24h: int = 0, tokens_prompt_24h: int = 0) -> dict:
     """Show what % of each subscription plan's window limits the local usage would consume.
     
-    Subscription limits are rolling windows (3h or 5h). We calculate how many
-    tokens would accumulate in ONE window at the current throughput rate,
-    then compare against the plan's per-window token budget.
-    
-    Uses 24h rolling throughput if available, otherwise extrapolates from uptime.
+    Subscription limits are rolling windows (3h or 5h). Each model has its own
+    separate allowance. We calculate how many tokens would accumulate in ONE
+    window at the current throughput rate, then compare against that model's
+    per-window token budget.
     """
     # Calculate tokens per hour
     if uptime_s > 3600 and (tokens_gen_24h > 0 or tokens_prompt_24h > 0):
-        # Use 24h rolling data (most representative)
-        # Scale to 24h if we have less than 24h of data
         scale = min(86400 / uptime_s, 1.0) if uptime_s < 86400 else 1.0
         tokens_per_hour = ((tokens_prompt_24h + tokens_gen_24h) / (uptime_s / 3600)) * scale
     elif uptime_s > 60:
-        # Extrapolate from uptime
         total_tokens = total_prompt + total_gen
         tokens_per_hour = total_tokens / (uptime_s / 3600)
     else:
@@ -141,30 +149,30 @@ def compute_subscription_usage(total_prompt: int, total_gen: int, uptime_s: floa
     results = {}
     for plan_name, plan in SUBSCRIPTION_LIMITS.items():
         window_hours = plan["window_hours"]
-        msgs = plan["messages_per_window"]
-        tpm = plan["tokens_per_msg"]
-        tokens_per_window = msgs * tpm
-
-        # Tokens that would accumulate in one window at current throughput
         tokens_in_window = tokens_per_hour * window_hours
 
-        usage_pct = (tokens_in_window / tokens_per_window * 100) if tokens_per_window > 0 else 0
-        breached = usage_pct > 100
+        for model_name, model_limits in plan["models"].items():
+            msgs = model_limits["messages"]
+            tpm = model_limits["tokens_per_msg"]
+            tokens_per_window = msgs * tpm
 
-        for model in plan["models"]:
-            key = f"{model} ({plan_name})"
+            usage_pct = (tokens_in_window / tokens_per_window * 100) if tokens_per_window > 0 else 0
+            breached = usage_pct > 100
+
+            key = f"{model_name} ({plan_name})"
             results[key] = {
                 "plan": plan_name,
-                "model": model,
+                "model": model_name,
                 "provider": plan["provider"],
                 "price_monthly": plan["price_monthly"],
                 "window_hours": window_hours,
                 "messages_per_window": msgs,
+                "tokens_per_msg": tpm,
                 "tokens_per_window": tokens_per_window,
                 "tokens_in_window": round(tokens_in_window),
                 "usage_pct": round(usage_pct, 1),
                 "breached": breached,
-                "total_cost": 0,  # subscription is flat fee, not per-token
+                "total_cost": 0,
             }
     return results
 
