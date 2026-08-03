@@ -276,7 +276,7 @@
     </div>
     <table class="cost-table">
       <thead>
-        <tr>
+        <tr id="table-header-row">
           <th>MODEL</th>
           <th>INPUT $/1M</th>
           <th>CACHED $/1M</th>
@@ -510,19 +510,13 @@ function renderDashboard(data) {
     const costs24h = data.cost_savings_24h || {};
     const started = data.started || '';
 
-    // Best saving = most expensive frontier model total
-    const activeCostsForBanner = pricingMode === 'subscription'
-      ? (data.subscription_costs || {})
-      : costs;
-    const allTotals = Object.entries(activeCostsForBanner)
+    // Best saving = most expensive frontier model total (always API costs)
+    const allTotals = Object.entries(costs)
       .filter(([n]) => !n.includes('Local'))
       .map(([, c]) => c.total_cost || 0);
     const bestSaving = allTotals.length ? Math.max(...allTotals) : 0;
 
-    const activeCosts24h = pricingMode === 'subscription'
-      ? (data.subscription_costs_24h || {})
-      : costs24h;
-    const allTotals24h = Object.entries(activeCosts24h)
+    const allTotals24h = Object.entries(costs24h)
       .filter(([n]) => !n.includes('Local'))
       .map(([, c]) => c.total_cost || 0);
     const bestSaving24h = allTotals24h.length ? Math.max(...allTotals24h) : 0;
@@ -536,9 +530,9 @@ function renderDashboard(data) {
       fmt(d.total_gen_tokens || 0, 0) + ' gen tokens' +
       (chr > 0 ? ' · ' + chr.toFixed(1) + '% cache hit rate applied' : '');
 
-    // Compare boxes — show top 3 most expensive frontier models dynamically
+    // Compare boxes — show top 3 most expensive frontier models dynamically (API costs)
     const compareEl = document.getElementById('savings-compare');
-    const frontierCosts = Object.entries(activeCostsForBanner)
+    const frontierCosts = Object.entries(costs)
       .filter(([n]) => !n.includes('Local'))
       .sort((a, b) => (b[1].total_cost || 0) - (a[1].total_cost || 0))
       .slice(0, 3);
@@ -559,13 +553,12 @@ function renderDashboard(data) {
     let tableEntries = [];
 
     if (pricingMode === 'subscription') {
-      // Subscription: show cheapest plan per model + local row
-      const subCosts = data.subscription_costs || {};
-      // Group by model name, pick cheapest plan
+      // Subscription: show usage % per plan, grouped by plan, cheapest first per model
+      const subUsage = data.subscription_usage || {};
       const bestByModel = {};
-      Object.entries(subCosts).forEach(([key, c]) => {
+      Object.entries(subUsage).forEach(([key, c]) => {
         const model = c.model;
-        if (!bestByModel[model] || c.total_cost < bestByModel[model].total_cost) {
+        if (!bestByModel[model] || c.price_monthly < bestByModel[model].price_monthly) {
           bestByModel[model] = { ...c, name: key };
         }
       });
@@ -575,6 +568,7 @@ function renderDashboard(data) {
     }
 
     const tableRows = [];
+    const headerRow = document.getElementById('table-header-row');
 
     // Always add local model row first
     tableRows.push(`<tr class="local-row">
@@ -586,24 +580,51 @@ function renderDashboard(data) {
       <td class="savings-cell">${fmtMoney(bestSaving)}</td>
     </tr>`);
 
-    tableEntries.forEach(([name, c]) => {
-      const prices = costTable[name] || costTable[c.model] || {};
-      const cachedRate = prices.cached_input;
-      const plan = c.plan || null;
-
-      const rateLabel = plan
-        ? '<br><span style="font-size:11px;color:#484f58">~$' + (c.effective_per_m || 0).toFixed(2) + '/M via ' + plan + '</span>'
-        : '';
-
-      tableRows.push(`<tr>
-        <td class="model-name">${(c.model || name)}${rateLabel}</td>
-        <td>${fmtMoney(prices.input || (c.effective_per_m ? c.effective_per_m * 0.25 : 0))}</td>
-        <td>${cachedRate !== undefined ? fmtMoney(cachedRate) : (c.effective_per_m ? fmtMoney(c.effective_per_m * 0.25) : '—')}</td>
-        <td>${fmtMoney(prices.output || (c.effective_per_m ? c.effective_per_m * 0.75 : 0))}</td>
-        <td class="cost-cell">${fmtMoney(c.total_cost)}</td>
+    if (pricingMode === 'subscription') {
+      headerRow.innerHTML = '<th>PLAN</th><th>MODEL</th><th>WINDOW</th><th>TOKEN BUDGET</th><th>USAGE %</th><th>STATUS</th>';
+      tableRows[0] = `<tr class="local-row">
+        <td class="model-name">Aria 27B (Local)</td>
         <td>—</td>
-      </tr>`);
-    });
+        <td>—</td>
+        <td>Unlimited</td>
+        <td style="color:#3fb950">0%</td>
+        <td style="color:#3fb950">✓ No limits</td>
+      </tr>`;
+
+      tableEntries.forEach(([name, c]) => {
+        const pct = c.usage_pct || 0;
+        const breached = c.breached;
+        const pctColor = breached ? '#f85149' : pct > 80 ? '#d29922' : '#3fb950';
+        const statusText = breached ? '⚠ LIMIT EXCEEDED' : pct > 80 ? 'Near limit' : 'OK';
+        const statusColor = breached ? '#f85149' : pct > 80 ? '#d29922' : '#8b949e';
+        const budgetK = (c.tokens_per_window / 1000).toFixed(0) + 'K';
+
+        tableRows.push(`<tr style="${breached ? 'background:rgba(248,81,73,0.08)' : ''}">
+          <td class="model-name">${c.plan}<br><span style="font-size:11px;color:#484f58">$${c.price_monthly}/mo</span></td>
+          <td>${c.model}</td>
+          <td>${c.window_hours}h rolling</td>
+          <td>${budgetK} tokens/window</td>
+          <td style="color:${pctColor};font-weight:600">${pct.toFixed(1)}%</td>
+          <td style="color:${statusColor};font-weight:${breached ? '700' : '400'}">${statusText}</td>
+        </tr>`);
+      });
+    } else {
+      headerRow.innerHTML = '<th>MODEL</th><th>INPUT $/1M</th><th>CACHED $/1M</th><th>OUTPUT $/1M</th><th>TOTAL COST</th><th>SAVINGS</th>';
+
+      tableEntries.forEach(([name, c]) => {
+        const prices = costTable[name] || costTable[c.model] || {};
+        const cachedRate = prices.cached_input;
+
+        tableRows.push(`<tr>
+          <td class="model-name">${(c.model || name)}</td>
+          <td>${fmtMoney(prices.input || 0)}</td>
+          <td>${cachedRate !== undefined ? fmtMoney(cachedRate) : '—'}</td>
+          <td>${fmtMoney(prices.output || 0)}</td>
+          <td class="cost-cell">${fmtMoney(c.total_cost)}</td>
+          <td>—</td>
+        </tr>`);
+      });
+    }
     tableBody.innerHTML = tableRows.join('');
 
     // Charts — append new data point

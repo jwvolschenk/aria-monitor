@@ -57,62 +57,102 @@ COST_TABLE: dict[str, dict[str, float]] = {
     "GPT-5.6 Luna":        {"input": 1.00,  "output": 6.00, "cached_input": 0.10},
 }
 
-# Subscription plans — effective per-token rates based on monthly fee and
-# typical usage. These give a "best case" cost for heavy subscription users.
-# Effective rate = monthly_price / estimated_monthly_tokens (split 1:3 input:output).
-# ESTIMATED_MONTHLY_TOKENS controls the usage assumption (default 10M/month).
-ESTIMATED_MONTHLY_TOKENS = float(os.environ.get("ESTIMATED_MONTHLY_TOKENS", "10"))  # millions
-
-SUBSCRIPTION_PLANS: dict[str, dict] = {
+# Subscription plan usage limits (estimated from published caps).
+# Providers limit by messages, not tokens. We estimate tokens per message
+# to derive a token budget per rolling window, then show % consumed.
+# Avg tokens/msg: ~500 (mixed short/medium conversations).
+# Window: the rolling period before limits reset.
+SUBSCRIPTION_LIMITS: dict[str, dict] = {
     "ChatGPT Plus ($20/mo)": {
-        "monthly_usd": 20,
+        "provider": "OpenAI",
+        "price_monthly": 20,
+        "window_hours": 3,
+        "messages_per_window": 160,
+        "tokens_per_msg": 500,
+        "models": ["GPT-5.6 Sol", "GPT-5.6 Terra", "GPT-5.6 Luna"],
+    },
+    "ChatGPT Pro ($100/mo)": {
+        "provider": "OpenAI",
+        "price_monthly": 100,
+        "window_hours": 3,
+        "messages_per_window": 800,  # 5x Plus
+        "tokens_per_msg": 500,
         "models": ["GPT-5.6 Sol", "GPT-5.6 Terra", "GPT-5.6 Luna"],
     },
     "ChatGPT Pro ($200/mo)": {
-        "monthly_usd": 200,
+        "provider": "OpenAI",
+        "price_monthly": 200,
+        "window_hours": 3,
+        "messages_per_window": 3200,  # 20x Plus
+        "tokens_per_msg": 500,
         "models": ["GPT-5.6 Sol", "GPT-5.6 Terra", "GPT-5.6 Luna"],
     },
     "Claude Pro ($20/mo)": {
-        "monthly_usd": 20,
+        "provider": "Anthropic",
+        "price_monthly": 20,
+        "window_hours": 5,
+        "messages_per_window": 45,
+        "tokens_per_msg": 1000,  # longer avg context with Claude
+        "models": ["Claude Sonnet 5", "Claude Opus 5", "Claude Fable 5"],
+    },
+    "Claude Max ($100/mo)": {
+        "provider": "Anthropic",
+        "price_monthly": 100,
+        "window_hours": 5,
+        "messages_per_window": 225,  # 5x Pro
+        "tokens_per_msg": 1000,
         "models": ["Claude Sonnet 5", "Claude Opus 5", "Claude Fable 5"],
     },
     "Claude Max ($200/mo)": {
-        "monthly_usd": 200,
+        "provider": "Anthropic",
+        "price_monthly": 200,
+        "window_hours": 5,
+        "messages_per_window": 900,  # 20x Pro
+        "tokens_per_msg": 1000,
         "models": ["Claude Sonnet 5", "Claude Opus 5", "Claude Fable 5"],
     },
 }
 
 
-def compute_subscription_costs(total_prompt: int, total_gen: int) -> dict:
-    """Compute effective per-token costs under subscription plans.
+def compute_subscription_usage(total_prompt: int, total_gen: int, uptime_s: float) -> dict:
+    """Show what % of each subscription plan's limits the local usage would consume.
     
-    Distributes the monthly fee across models based on estimated usage,
-    then calculates effective $/token for the actual tokens processed.
+    Compares actual tokens processed against the plan's token budget
+    (messages_per_window * tokens_per_msg extrapolated to uptime).
     """
-    total_tokens_m = ESTIMATED_MONTHLY_TOKENS  # millions per month
+    total_tokens = total_prompt + total_gen
     results = {}
-    for plan_name, plan in SUBSCRIPTION_PLANS.items():
-        monthly = plan["monthly_usd"]
-        models = plan["models"]
-        # Effective rate per 1M tokens (total, not split input/output)
-        # Assume 1:3 input:output token ratio typical
-        effective_per_m = monthly / total_tokens_m
-        # Split: 25% input, 75% output weighting
-        effective_input_per_m = effective_per_m * 0.25
-        effective_output_per_m = effective_per_m * 0.75
 
-        for model_name in models:
-            key = f"{model_name} ({plan_name})"
-            input_cost = (total_prompt / 1_000_000) * effective_input_per_m
-            output_cost = (total_gen / 1_000_000) * effective_output_per_m
+    for plan_name, plan in SUBSCRIPTION_LIMITS.items():
+        window_hours = plan["window_hours"]
+        msgs = plan["messages_per_window"]
+        tpm = plan["tokens_per_msg"]
+        tokens_per_window = msgs * tpm
+
+        # How many windows fit in the uptime period
+        if uptime_s > 0 and window_hours > 0:
+            windows_elapsed = uptime_s / (window_hours * 3600)
+            total_budget = tokens_per_window * max(windows_elapsed, 1)
+        else:
+            total_budget = tokens_per_window
+
+        usage_pct = (total_tokens / total_budget * 100) if total_budget > 0 else 0
+        breached = usage_pct > 100
+
+        for model in plan["models"]:
+            key = f"{model} ({plan_name})"
             results[key] = {
-                "input_cost": round(input_cost, 4),
-                "output_cost": round(output_cost, 4),
-                "total_cost": round(input_cost + output_cost, 4),
                 "plan": plan_name,
-                "monthly_usd": monthly,
-                "effective_per_m": round(effective_per_m, 2),
-                "model": model_name,
+                "model": model,
+                "provider": plan["provider"],
+                "price_monthly": plan["price_monthly"],
+                "window_hours": window_hours,
+                "messages_per_window": msgs,
+                "tokens_per_window": tokens_per_window,
+                "total_budget": round(total_budget),
+                "usage_pct": round(usage_pct, 1),
+                "breached": breached,
+                "total_cost": 0,  # subscription is flat fee, not per-token
             }
     return results
 
@@ -568,16 +608,17 @@ class MonitorHandler(BaseHTTPRequestHandler):
         total_requests = delta.get("total_requests", 0)
         cache_hit_rate = delta.get("cache_hit_rate", 0)
         cost_savings = compute_cost_savings(total_prompt, total_gen, cache_hit_rate)
-        sub_costs = compute_subscription_costs(total_prompt, total_gen)
+
+        uptime_s = time.time() - start_time
+        start_iso = datetime.fromtimestamp(start_time, tz=timezone.utc).strftime("%Y-%m-%d")
+
+        sub_usage = compute_subscription_usage(total_prompt, total_gen, uptime_s)
 
         # 24h cost savings
         daily_prompt = daily.get("tokens_prompt_24h", 0)
         daily_gen = daily.get("tokens_gen_24h", 0)
         cost_savings_24h = compute_cost_savings(daily_prompt, daily_gen, cache_hit_rate)
-        sub_costs_24h = compute_subscription_costs(daily_prompt, daily_gen)
-
-        uptime_s = time.time() - start_time
-        start_iso = datetime.fromtimestamp(start_time, tz=timezone.utc).strftime("%Y-%m-%d")
+        sub_usage_24h = compute_subscription_usage(daily_prompt, daily_gen, 86400)
 
         # Electricity cost
         with lock:
@@ -613,8 +654,8 @@ class MonitorHandler(BaseHTTPRequestHandler):
             "daily": daily,
             "cost_savings": cost_savings,
             "cost_savings_24h": cost_savings_24h,
-            "subscription_costs": sub_costs,
-            "subscription_costs_24h": sub_costs_24h,
+            "subscription_usage": sub_usage,
+            "subscription_usage_24h": sub_usage_24h,
             "cache_hit_rate": cache_hit_rate,
             "electricity": electricity,
             "cost_table": COST_TABLE,
