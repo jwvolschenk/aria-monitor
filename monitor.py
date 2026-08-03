@@ -34,17 +34,20 @@ HISTORY_24H_MAX = int(os.environ.get("HISTORY_24H_MAX", "86400"))   # 24h @ 1s
 MODEL_NAME = os.environ.get("MODEL_NAME", "aria-27b")
 MODEL_DISPLAY = os.environ.get("MODEL_DISPLAY", "Aria 27B (NVFP4)")
 
-# Cost per 1M tokens — frontier model pricing (USD, as of mid-2026)
-# Update these as pricing changes.
+# Cost per 1M tokens — frontier model pricing (USD, as of August 2026)
+# Best-case pricing: using introductory/promotional rates where available.
+# Claude Sonnet 5: $2/$10 introductory through Aug 31 2026 (standard $3/$15)
+# Claude Opus 5: $5/$25
+# GPT-5.6 Sol: $5/$30 (flagship)
+# GPT-5.6 Terra: $2.50/$15 (balanced, competitive with GPT-5.5)
+# GPT-5.6 Luna: $1/$6 (fast, low-cost)
 COST_TABLE: dict[str, dict[str, float]] = {
-    "Aria 27B (Local)":       {"input": 0.0,    "output": 0.0},
-    "GPT-4o":                 {"input": 2.50,   "output": 10.00},
-    "GPT-4o-mini":            {"input": 0.15,   "output": 0.60},
-    "Claude Sonnet 4":       {"input": 3.00,   "output": 15.00},
-    "Claude Haiku 3.5":      {"input": 0.80,   "output": 4.00},
-    "Gemini 2.5 Pro":        {"input": 1.25,   "output": 10.00},
-    "Gemini 2.5 Flash":      {"input": 0.15,   "output": 0.60},
-    "Qwen3.6-27B (API est)": {"input": 0.30,   "output": 1.20},
+    "Aria 27B (Local)":    {"input": 0.0,   "output": 0.0},
+    "Claude Sonnet 5":     {"input": 2.00,  "output": 10.00},
+    "Claude Opus 5":       {"input": 5.00,  "output": 25.00},
+    "GPT-5.6 Sol":         {"input": 5.00,  "output": 30.00},
+    "GPT-5.6 Terra":       {"input": 2.50,  "output": 15.00},
+    "GPT-5.6 Luna":        {"input": 1.00,  "output": 6.00},
 }
 
 VLLM_URL = f"http://{VLLM_HOST}:{VLLM_PORT}/metrics"
@@ -478,11 +481,18 @@ class MonitorHandler(BaseHTTPRequestHandler):
         total_requests = delta.get("total_requests", 0)
         cost_savings = compute_cost_savings(total_prompt, total_gen)
 
+        # 24h cost savings
+        daily_prompt = daily.get("tokens_prompt_24h", 0)
+        daily_gen = daily.get("tokens_gen_24h", 0)
+        cost_savings_24h = compute_cost_savings(daily_prompt, daily_gen)
+
         uptime_s = time.time() - start_time
+        start_iso = datetime.fromtimestamp(start_time, tz=timezone.utc).strftime("%Y-%m-%d")
 
         return {
             "now": time.time(),
             "uptime_s": uptime_s,
+            "started": start_iso,
             "model": MODEL_DISPLAY,
             "vllm_host": VLLM_HOST,
             "vllm_port": VLLM_PORT,
@@ -490,6 +500,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
             "hourly": hourly,
             "daily": daily,
             "cost_savings": cost_savings,
+            "cost_savings_24h": cost_savings_24h,
             "cost_table": COST_TABLE,
         }
 

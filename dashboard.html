@@ -81,7 +81,14 @@
     background: var(--surface); border: 1px solid var(--border);
     border-radius: 8px; padding: 16px;
   }
-  .chart-box h3 { font-size: 13px; color: var(--text-dim); margin-bottom: 12px; font-weight: 500; }
+  .chart-box h3 {
+    font-size: 13px; color: var(--text-dim); margin-bottom: 12px; font-weight: 500;
+    cursor: pointer; user-select: none; display: flex; align-items: center; gap: 8px;
+  }
+  .chart-box h3::before { content: '▼'; font-size: 10px; transition: transform 0.2s; }
+  .chart-box.collapsed h3::before { transform: rotate(-90deg); }
+  .chart-box.collapsed canvas { display: none; }
+  .chart-box.collapsed h3 { margin-bottom: 0; }
   .chart-box canvas { width: 100% !important; height: 220px !important; }
 
   /* Cost table */
@@ -145,9 +152,17 @@
 
   <!-- Savings banner -->
   <div class="savings-banner">
-    <div>
-      <div class="savings-label">Total Cost Savings vs Frontier Models</div>
-      <div class="savings-amount" id="savings-total">$0.00</div>
+    <div style="flex:1">
+      <div class="savings-row" style="display:flex;gap:48px;align-items:flex-end">
+        <div>
+          <div class="savings-label">Cost Savings (24h)</div>
+          <div class="savings-amount" id="savings-24h">$0.00</div>
+        </div>
+        <div>
+          <div class="savings-label">Total Cost Savings <span id="savings-since" style="color:#484f58"></span></div>
+          <div class="savings-amount" id="savings-total">$0.00</div>
+        </div>
+      </div>
       <div class="savings-sub" id="savings-sub">0 prompt tokens · 0 generation tokens</div>
     </div>
     <div class="savings-compare" id="savings-compare"></div>
@@ -284,13 +299,27 @@ const chartDefaults = {
 };
 
 function makeChart(id, datasets) {
-  const ctx = document.getElementById(id).getContext('2d');
+  const canvas = document.getElementById(id);
+  const ctx = canvas.getContext('2d');
+  // Fix blurry text on HiDPI/Retina displays
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
   return new Chart(ctx, {
     type: 'line',
     data: { datasets },
     options: JSON.parse(JSON.stringify(chartDefaults)),
   });
 }
+
+// Collapsible chart boxes
+document.querySelectorAll('.chart-box h3').forEach(h3 => {
+  h3.addEventListener('click', () => {
+    h3.parentElement.classList.toggle('collapsed');
+  });
+});
 
 const chartThroughput = makeChart('chart-throughput', [
   { label: 'Generation', data: [], borderColor: '#3fb950', backgroundColor: 'rgba(63,185,80,0.1)', fill: true, pointRadius: 0, borderWidth: 1.5 },
@@ -409,18 +438,30 @@ async function refresh() {
 
     // Savings banner
     const costs = data.cost_savings || {};
-    const localCost = costs['Aria 27B (Local)'] || {};
-    const gptCost = costs['GPT-4o'] || {};
-    const claudeCost = costs['Claude Sonnet 4'] || {};
-    const bestSaving = Math.max(gptCost.total_cost || 0, claudeCost.total_cost || 0);
+    const costs24h = data.cost_savings_24h || {};
+    const started = data.started || '';
+
+    // Best saving = most expensive frontier model total
+    const allTotals = Object.entries(costs)
+      .filter(([n]) => !n.includes('Local'))
+      .map(([, c]) => c.total_cost || 0);
+    const bestSaving = allTotals.length ? Math.max(...allTotals) : 0;
+
+    const allTotals24h = Object.entries(costs24h)
+      .filter(([n]) => !n.includes('Local'))
+      .map(([, c]) => c.total_cost || 0);
+    const bestSaving24h = allTotals24h.length ? Math.max(...allTotals24h) : 0;
+
+    document.getElementById('savings-24h').textContent = fmtMoney(bestSaving24h);
     document.getElementById('savings-total').textContent = fmtMoney(bestSaving);
+    document.getElementById('savings-since').textContent = started ? '(since ' + started + ')' : '';
     document.getElementById('savings-sub').textContent =
       fmt(d.total_prompt_tokens || 0, 0) + ' prompt tokens · ' +
       fmt(d.total_gen_tokens || 0, 0) + ' generation tokens';
 
-    // Compare boxes
+    // Compare boxes — show top 3 most expensive frontier models
     const compareEl = document.getElementById('savings-compare');
-    const highlights = ['GPT-4o', 'Claude Sonnet 4', 'Gemini 2.5 Pro', 'GPT-4o-mini'];
+    const highlights = ['GPT-5.6 Sol', 'Claude Opus 5', 'Claude Sonnet 5'];
     compareEl.innerHTML = highlights.map(name => {
       const c = costs[name] || {};
       return `<div class="savings-model">
