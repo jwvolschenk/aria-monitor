@@ -57,6 +57,65 @@ COST_TABLE: dict[str, dict[str, float]] = {
     "GPT-5.6 Luna":        {"input": 1.00,  "output": 6.00, "cached_input": 0.10},
 }
 
+# Subscription plans — effective per-token rates based on monthly fee and
+# typical usage. These give a "best case" cost for heavy subscription users.
+# Effective rate = monthly_price / estimated_monthly_tokens (split 1:3 input:output).
+# ESTIMATED_MONTHLY_TOKENS controls the usage assumption (default 10M/month).
+ESTIMATED_MONTHLY_TOKENS = float(os.environ.get("ESTIMATED_MONTHLY_TOKENS", "10"))  # millions
+
+SUBSCRIPTION_PLANS: dict[str, dict] = {
+    "ChatGPT Plus ($20/mo)": {
+        "monthly_usd": 20,
+        "models": ["GPT-5.6 Sol", "GPT-5.6 Terra", "GPT-5.6 Luna"],
+    },
+    "ChatGPT Pro ($200/mo)": {
+        "monthly_usd": 200,
+        "models": ["GPT-5.6 Sol", "GPT-5.6 Terra", "GPT-5.6 Luna"],
+    },
+    "Claude Pro ($20/mo)": {
+        "monthly_usd": 20,
+        "models": ["Claude Sonnet 5", "Claude Opus 5", "Claude Fable 5"],
+    },
+    "Claude Max ($200/mo)": {
+        "monthly_usd": 200,
+        "models": ["Claude Sonnet 5", "Claude Opus 5", "Claude Fable 5"],
+    },
+}
+
+
+def compute_subscription_costs(total_prompt: int, total_gen: int) -> dict:
+    """Compute effective per-token costs under subscription plans.
+    
+    Distributes the monthly fee across models based on estimated usage,
+    then calculates effective $/token for the actual tokens processed.
+    """
+    total_tokens_m = ESTIMATED_MONTHLY_TOKENS  # millions per month
+    results = {}
+    for plan_name, plan in SUBSCRIPTION_PLANS.items():
+        monthly = plan["monthly_usd"]
+        models = plan["models"]
+        # Effective rate per 1M tokens (total, not split input/output)
+        # Assume 1:3 input:output token ratio typical
+        effective_per_m = monthly / total_tokens_m
+        # Split: 25% input, 75% output weighting
+        effective_input_per_m = effective_per_m * 0.25
+        effective_output_per_m = effective_per_m * 0.75
+
+        for model_name in models:
+            key = f"{model_name} ({plan_name})"
+            input_cost = (total_prompt / 1_000_000) * effective_input_per_m
+            output_cost = (total_gen / 1_000_000) * effective_output_per_m
+            results[key] = {
+                "input_cost": round(input_cost, 4),
+                "output_cost": round(output_cost, 4),
+                "total_cost": round(input_cost + output_cost, 4),
+                "plan": plan_name,
+                "monthly_usd": monthly,
+                "effective_per_m": round(effective_per_m, 2),
+                "model": model_name,
+            }
+    return results
+
 VLLM_URL = f"http://{VLLM_HOST}:{VLLM_PORT}/metrics"
 
 # ---------------------------------------------------------------------------
@@ -509,11 +568,13 @@ class MonitorHandler(BaseHTTPRequestHandler):
         total_requests = delta.get("total_requests", 0)
         cache_hit_rate = delta.get("cache_hit_rate", 0)
         cost_savings = compute_cost_savings(total_prompt, total_gen, cache_hit_rate)
+        sub_costs = compute_subscription_costs(total_prompt, total_gen)
 
         # 24h cost savings
         daily_prompt = daily.get("tokens_prompt_24h", 0)
         daily_gen = daily.get("tokens_gen_24h", 0)
         cost_savings_24h = compute_cost_savings(daily_prompt, daily_gen, cache_hit_rate)
+        sub_costs_24h = compute_subscription_costs(daily_prompt, daily_gen)
 
         uptime_s = time.time() - start_time
         start_iso = datetime.fromtimestamp(start_time, tz=timezone.utc).strftime("%Y-%m-%d")
@@ -552,6 +613,8 @@ class MonitorHandler(BaseHTTPRequestHandler):
             "daily": daily,
             "cost_savings": cost_savings,
             "cost_savings_24h": cost_savings_24h,
+            "subscription_costs": sub_costs,
+            "subscription_costs_24h": sub_costs_24h,
             "cache_hit_rate": cache_hit_rate,
             "electricity": electricity,
             "cost_table": COST_TABLE,

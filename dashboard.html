@@ -97,6 +97,13 @@
     border-radius: 8px; padding: 20px 24px; margin-bottom: 24px;
   }
   .cost-section h3 { font-size: 14px; color: var(--text-dim); margin-bottom: 16px; }
+  .toggle-btn {
+    background: var(--bg); color: var(--text-dim); border: none;
+    padding: 6px 14px; font-size: 12px; cursor: pointer; font-weight: 500;
+    transition: background 0.15s, color 0.15s;
+  }
+  .toggle-btn.active { background: var(--accent); color: #fff; }
+  .toggle-btn:hover:not(.active) { background: var(--border); color: var(--text); }
   .cost-table { width: 100%; border-collapse: collapse; }
   .cost-table th {
     text-align: left; font-size: 11px; text-transform: uppercase;
@@ -257,8 +264,16 @@
 
   <!-- Cost comparison table -->
   <div class="cost-section">
-    <h3>Cost Comparison — If These Tokens Were Served by Frontier Models</h3>
-    <p style="font-size:12px;color:#484f58;margin:-8px 0 16px">Pricing includes cache read rates applied at the local model's cache hit rate for fair comparison</p>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+      <div>
+        <h3 style="margin-bottom:4px">Cost Comparison — If These Tokens Were Served by Frontier Models</h3>
+        <p style="font-size:12px;color:#484f58;margin:0">Pricing includes cache read rates applied at the local model's cache hit rate for fair comparison</p>
+      </div>
+      <div id="pricing-toggle" style="display:flex;border:1px solid var(--border);border-radius:6px;overflow:hidden">
+        <button id="toggle-api" class="toggle-btn active" onclick="setPricingMode('api')">API Pricing</button>
+        <button id="toggle-sub" class="toggle-btn" onclick="setPricingMode('subscription')">Subscription</button>
+      </div>
+    </div>
     <table class="cost-table">
       <thead>
         <tr>
@@ -320,11 +335,20 @@ function makeChart(id, datasets) {
   });
 }
 
-// Collapsible chart boxes
-document.querySelectorAll('.chart-box h3').forEach(h3 => {
-  h3.addEventListener('click', () => {
-    h3.parentElement.classList.toggle('collapsed');
-  });
+// Collapsible chart boxes — start collapsed
+document.querySelectorAll('.chart-box').forEach(box => {
+  box.classList.add('collapsed');
+  const h3 = box.querySelector('h3');
+  if (h3) {
+    h3.addEventListener('click', () => {
+      box.classList.toggle('collapsed');
+      // Trigger chart resize when uncollapsing
+      if (!box.classList.contains('collapsed')) {
+        const canvas = box.querySelector('canvas');
+        if (canvas && canvas.chart) canvas.chart.resize();
+      }
+    });
+  }
 });
 
 const chartThroughput = makeChart('chart-throughput', [
@@ -361,6 +385,15 @@ function holdValue(key, value, holdMs = 10000) {
 // Currency support
 // ---------------------------------------------------------------------------
 const ZAR_RATE = 16.52;  // USD to ZAR, update periodically
+let pricingMode = 'api';  // 'api' or 'subscription'
+
+function setPricingMode(mode) {
+  pricingMode = mode;
+  document.getElementById('toggle-api').classList.toggle('active', mode === 'api');
+  document.getElementById('toggle-sub').classList.toggle('active', mode === 'subscription');
+  if (lastData) renderDashboard(lastData);
+}
+
 let currentCurrency = 'USD';
 let lastData = null;  // cached for re-render on currency change
 
@@ -478,12 +511,18 @@ function renderDashboard(data) {
     const started = data.started || '';
 
     // Best saving = most expensive frontier model total
-    const allTotals = Object.entries(costs)
+    const activeCostsForBanner = pricingMode === 'subscription'
+      ? (data.subscription_costs || {})
+      : costs;
+    const allTotals = Object.entries(activeCostsForBanner)
       .filter(([n]) => !n.includes('Local'))
       .map(([, c]) => c.total_cost || 0);
     const bestSaving = allTotals.length ? Math.max(...allTotals) : 0;
 
-    const allTotals24h = Object.entries(costs24h)
+    const activeCosts24h = pricingMode === 'subscription'
+      ? (data.subscription_costs_24h || {})
+      : costs24h;
+    const allTotals24h = Object.entries(activeCosts24h)
       .filter(([n]) => !n.includes('Local'))
       .map(([, c]) => c.total_cost || 0);
     const bestSaving24h = allTotals24h.length ? Math.max(...allTotals24h) : 0;
@@ -499,7 +538,7 @@ function renderDashboard(data) {
 
     // Compare boxes — show top 3 most expensive frontier models dynamically
     const compareEl = document.getElementById('savings-compare');
-    const frontierCosts = Object.entries(costs)
+    const frontierCosts = Object.entries(activeCostsForBanner)
       .filter(([n]) => !n.includes('Local'))
       .sort((a, b) => (b[1].total_cost || 0) - (a[1].total_cost || 0))
       .slice(0, 3);
@@ -514,37 +553,56 @@ function renderDashboard(data) {
     const tableBody = document.getElementById('cost-table-body');
     const elec = data.electricity || {};
     const elecCostUsd = elec.total_cost_usd || 0;
-    const elecKwh = elec.total_kwh || 0;
-    const zarPerKwh = elec.zar_per_kwh || 2;
 
-    // Get cost table pricing info for cached rates
+    // Select pricing source based on toggle
     const costTable = data.cost_table || {};
+    let tableEntries = [];
 
-    const tableRows = Object.entries(costs).map(([name, c]) => {
-      const isLocal = name.includes('Local');
-      const prices = costTable[name] || {};
+    if (pricingMode === 'subscription') {
+      // Subscription: show cheapest plan per model + local row
+      const subCosts = data.subscription_costs || {};
+      // Group by model name, pick cheapest plan
+      const bestByModel = {};
+      Object.entries(subCosts).forEach(([key, c]) => {
+        const model = c.model;
+        if (!bestByModel[model] || c.total_cost < bestByModel[model].total_cost) {
+          bestByModel[model] = { ...c, name: key };
+        }
+      });
+      tableEntries = Object.entries(bestByModel).map(([model, c]) => [c.name, c]);
+    } else {
+      tableEntries = Object.entries(costs).filter(([n]) => !n.includes('Local'));
+    }
+
+    const tableRows = [];
+
+    // Always add local model row first
+    tableRows.push(`<tr class="local-row">
+      <td class="model-name">Aria 27B (Local)</td>
+      <td>${fmtMoney(0)}</td>
+      <td>${fmtMoney(0)}</td>
+      <td>${fmtMoney(0)}</td>
+      <td class="cost-cell">${fmtMoney(elecCostUsd)} <span style="font-size:11px;color:#484f58">elec</span></td>
+      <td class="savings-cell">${fmtMoney(bestSaving)}</td>
+    </tr>`);
+
+    tableEntries.forEach(([name, c]) => {
+      const prices = costTable[name] || costTable[c.model] || {};
       const cachedRate = prices.cached_input;
+      const plan = c.plan || null;
 
-      if (isLocal) {
-        return `<tr class="local-row">
-          <td class="model-name">${name}</td>
-          <td>${fmtMoney(0)}</td>
-          <td>${fmtMoney(0)}</td>
-          <td>${fmtMoney(0)}</td>
-          <td class="cost-cell">${fmtMoney(elecCostUsd)} <span style="font-size:11px;color:#484f58">elec</span></td>
-          <td class="savings-cell">${fmtMoney(bestSaving)}</td>
-        </tr>`;
-      }
+      const rateLabel = plan
+        ? '<br><span style="font-size:11px;color:#484f58">~$' + (c.effective_per_m || 0).toFixed(2) + '/M via ' + plan + '</span>'
+        : '';
 
-      const saving = bestSaving - c.total_cost;
-      return `<tr>
-        <td class="model-name">${name}</td>
-        <td>${fmtMoney(prices.input || 0)}</td>
-        <td>${cachedRate !== undefined ? fmtMoney(cachedRate) : '—'}</td>
-        <td>${fmtMoney(prices.output || 0)}</td>
+      tableRows.push(`<tr>
+        <td class="model-name">${(c.model || name)}${rateLabel}</td>
+        <td>${fmtMoney(prices.input || (c.effective_per_m ? c.effective_per_m * 0.25 : 0))}</td>
+        <td>${cachedRate !== undefined ? fmtMoney(cachedRate) : (c.effective_per_m ? fmtMoney(c.effective_per_m * 0.25) : '—')}</td>
+        <td>${fmtMoney(prices.output || (c.effective_per_m ? c.effective_per_m * 0.75 : 0))}</td>
         <td class="cost-cell">${fmtMoney(c.total_cost)}</td>
         <td>—</td>
-      </tr>`;
+      </tr>`);
     });
     tableBody.innerHTML = tableRows.join('');
 
