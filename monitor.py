@@ -99,6 +99,12 @@ def get_metric_value(metrics: dict, name: str, label_filter: dict = None) -> flo
 def get_gpu_stats() -> dict:
     """Query nvidia-smi for GPU temperature, utilization, VRAM, power."""
     try:
+        def safe_float(s):
+            try:
+                return float(s)
+            except (ValueError, TypeError):
+                return 0.0
+
         cmd = [
             "nvidia-smi",
             f"--id={GPU_INDEX}",
@@ -111,12 +117,7 @@ def get_gpu_stats() -> dict:
             return {}
         parts = [p.strip() for p in result.stdout.strip().split(",")]
         if len(parts) >= 7:
-            def safe_float(s):
-                try:
-                    return float(s)
-                except (ValueError, TypeError):
-                    return 0.0
-            return {
+            stats = {
                 "temp": safe_float(parts[0]),
                 "gpu_util": safe_float(parts[1]),
                 "mem_util": safe_float(parts[2]),
@@ -125,6 +126,23 @@ def get_gpu_stats() -> dict:
                 "power_w": safe_float(parts[5]),
                 "power_limit_w": safe_float(parts[6]),
             }
+            # GB10 Blackwell doesn't report memory via --query-gpu.
+            # Fallback: sum used_memory from compute apps.
+            if stats["vram_used_mb"] == 0:
+                try:
+                    apps = subprocess.run(
+                        ["nvidia-smi",
+                         "--query-compute-apps=used_memory",
+                         "--format=csv,noheader,nounits"],
+                        capture_output=True, text=True, timeout=5)
+                    total = 0
+                    for line in apps.stdout.strip().splitlines():
+                        total += safe_float(line.strip())
+                    if total > 0:
+                        stats["vram_used_mb"] = total
+                except Exception:
+                    pass
+            return stats
     except Exception:
         pass
     return {}
