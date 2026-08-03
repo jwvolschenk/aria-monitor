@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aria Monitor — vLLM Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #e6edf3; --text-dim: #8b949e; --text-muted: #484f58;
+    --green: #3fb950; --green-dim: #1a4d2e; --blue: #58a6ff;
+    --blue-dim: #1a3a5c; --orange: #d29922; --red: #f85149;
+    --purple: #bc8cff; --cyan: #39d353;
+    --accent: #58a6ff;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.5;
+    min-height: 100vh;
+  }
+  .header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 24px; border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .header h1 { font-size: 20px; font-weight: 600; }
+  .header h1 span { color: var(--accent); }
+  .header-right { display: flex; align-items: center; gap: 16px; font-size: 13px; color: var(--text-dim); }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600;
+  }
+  .badge-idle { background: var(--surface); color: var(--text-muted); border: 1px solid var(--border); }
+  .badge-busy { background: var(--green-dim); color: var(--green); border: 1px solid var(--green); }
+  .badge-offline { background: #3d1414; color: var(--red); border: 1px solid var(--red); }
+  .badge-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .badge-busy .badge-dot { background: var(--green); animation: pulse 1.5s infinite; }
+  .badge-idle .badge-dot { background: var(--text-muted); }
+  .badge-offline .badge-dot { background: var(--red); }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  .container { max-width: 1400px; margin: 0 auto; padding: 20px 24px; }
+
+  /* Savings banner */
+  .savings-banner {
+    background: linear-gradient(135deg, #0d2818 0%, #161b22 100%);
+    border: 1px solid var(--green); border-radius: 12px;
+    padding: 24px 32px; margin-bottom: 24px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .savings-label { font-size: 14px; color: var(--text-dim); margin-bottom: 4px; }
+  .savings-amount { font-size: 42px; font-weight: 700; color: var(--green); }
+  .savings-sub { font-size: 13px; color: var(--text-dim); margin-top: 4px; }
+  .savings-compare { display: flex; gap: 24px; }
+  .savings-model {
+    text-align: center; padding: 12px 16px;
+    background: var(--surface); border-radius: 8px; min-width: 120px;
+  }
+  .savings-model .name { font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
+  .savings-model .cost { font-size: 18px; font-weight: 600; }
+
+  /* Cards grid */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px;
+  }
+  .card-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); margin-bottom: 6px; }
+  .card-value { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .card-sub { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+  .card.dim .card-value { color: var(--text-muted); }
+  .card.active .card-value { color: var(--green); }
+  .card.warn .card-value { color: var(--orange); }
+
+  /* Charts */
+  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+  .chart-box {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px;
+  }
+  .chart-box h3 { font-size: 13px; color: var(--text-dim); margin-bottom: 12px; font-weight: 500; }
+  .chart-box canvas { width: 100% !important; height: 220px !important; }
+
+  /* Cost table */
+  .cost-section {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 20px 24px; margin-bottom: 24px;
+  }
+  .cost-section h3 { font-size: 14px; color: var(--text-dim); margin-bottom: 16px; }
+  .cost-table { width: 100%; border-collapse: collapse; }
+  .cost-table th {
+    text-align: left; font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.5px; color: var(--text-muted); padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .cost-table td {
+    padding: 10px 12px; border-bottom: 1px solid var(--border);
+    font-size: 14px; font-variant-numeric: tabular-nums;
+  }
+  .cost-table tr:last-child td { border-bottom: none; }
+  .cost-table .model-name { font-weight: 500; }
+  .cost-table .local-row { color: var(--green); }
+  .cost-table .savings-cell { color: var(--green); font-weight: 600; }
+  .cost-table .cost-cell { color: var(--orange); }
+
+  /* Latency row */
+  .latency-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
+  .latency-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px; text-align: center;
+  }
+  .latency-card .label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; }
+  .latency-card .value { font-size: 24px; font-weight: 700; color: var(--blue); margin: 6px 0; }
+  .latency-card .unit { font-size: 12px; color: var(--text-muted); }
+
+  /* Footer */
+  .footer { text-align: center; padding: 20px; color: var(--text-muted); font-size: 12px; }
+
+  @media (max-width: 900px) {
+    .charts { grid-template-columns: 1fr; }
+    .savings-banner { flex-direction: column; text-align: center; gap: 16px; }
+    .savings-compare { flex-wrap: wrap; justify-content: center; }
+    .latency-row { grid-template-columns: repeat(2, 1fr); }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1><span>Aria</span> Monitor</h1>
+  <div class="header-right">
+    <span id="model-name">—</span>
+    <span id="uptime">—</span>
+    <span id="status-badge" class="badge badge-idle">
+      <span class="badge-dot"></span> <span id="status-text">LOADING</span>
+    </span>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- Savings banner -->
+  <div class="savings-banner">
+    <div>
+      <div class="savings-label">Total Cost Savings vs Frontier Models</div>
+      <div class="savings-amount" id="savings-total">$0.00</div>
+      <div class="savings-sub" id="savings-sub">0 prompt tokens · 0 generation tokens</div>
+    </div>
+    <div class="savings-compare" id="savings-compare"></div>
+  </div>
+
+  <!-- Metric cards -->
+  <div class="cards">
+    <div class="card dim" id="card-gen-tps">
+      <div class="card-label">Generation Throughput</div>
+      <div class="card-value" id="gen-tps">0</div>
+      <div class="card-sub">tokens/sec (instant)</div>
+    </div>
+    <div class="card dim" id="card-prompt-tps">
+      <div class="card-label">Prompt Throughput</div>
+      <div class="card-value" id="prompt-tps">0</div>
+      <div class="card-sub">tokens/sec (instant)</div>
+    </div>
+    <div class="card" id="card-requests">
+      <div class="card-label">Active Requests</div>
+      <div class="card-value" id="requests-running">0</div>
+      <div class="card-sub" id="requests-waiting-sub">0 waiting</div>
+    </div>
+    <div class="card" id="card-kv-cache">
+      <div class="card-label">KV Cache Usage</div>
+      <div class="card-value" id="kv-cache">0%</div>
+      <div class="card-sub">GPU memory cache</div>
+    </div>
+    <div class="card" id="card-total-req">
+      <div class="card-label">Total Requests</div>
+      <div class="card-value" id="total-requests">0</div>
+      <div class="card-sub" id="req-24h-sub">0 in last 24h</div>
+    </div>
+    <div class="card" id="card-spec-rate">
+      <div class="card-label">Spec Decode Rate</div>
+      <div class="card-value" id="spec-rate">0%</div>
+      <div class="card-sub">draft acceptance</div>
+    </div>
+    <div class="card" id="card-cache-rate">
+      <div class="card-label">Prefix Cache Hit</div>
+      <div class="card-value" id="cache-rate">0%</div>
+      <div class="card-sub">cache efficiency</div>
+    </div>
+    <div class="card" id="card-gen-1h">
+      <div class="card-label">Avg Gen (1h)</div>
+      <div class="card-value" id="gen-1h">0</div>
+      <div class="card-sub" id="gen-1h-sub">tok/s active avg</div>
+    </div>
+  </div>
+
+  <!-- Latency cards -->
+  <div class="latency-row">
+    <div class="latency-card">
+      <div class="label">Avg TTFT</div>
+      <div class="value" id="avg-ttft">—</div>
+      <div class="unit">ms</div>
+    </div>
+    <div class="latency-card">
+      <div class="label">Avg E2E Latency</div>
+      <div class="value" id="avg-e2e">—</div>
+      <div class="unit">seconds</div>
+    </div>
+    <div class="latency-card">
+      <div class="label">Avg Inter-Token</div>
+      <div class="value" id="avg-itl">—</div>
+      <div class="unit">ms</div>
+    </div>
+    <div class="latency-card">
+      <div class="label">GPU Power</div>
+      <div class="value" id="gpu-power">—</div>
+      <div class="unit">watts</div>
+    </div>
+  </div>
+
+  <!-- Charts -->
+  <div class="charts">
+    <div class="chart-box">
+      <h3>Token Throughput (tokens/sec) — 5 min</h3>
+      <canvas id="chart-throughput"></canvas>
+    </div>
+    <div class="chart-box">
+      <h3>GPU Utilization (%) — 5 min</h3>
+      <canvas id="chart-gpu"></canvas>
+    </div>
+    <div class="chart-box">
+      <h3>GPU Temperature (°C) — 5 min</h3>
+      <canvas id="chart-temp"></canvas>
+    </div>
+    <div class="chart-box">
+      <h3>VRAM Usage (MB) — 5 min</h3>
+      <canvas id="chart-vram"></canvas>
+    </div>
+  </div>
+
+  <!-- Cost comparison table -->
+  <div class="cost-section">
+    <h3>Cost Comparison — If These Tokens Were Served by Frontier Models</h3>
+    <table class="cost-table">
+      <thead>
+        <tr>
+          <th>Model</th>
+          <th>Input Cost</th>
+          <th>Output Cost</th>
+          <th>Total Cost</th>
+          <th>Savings</th>
+        </tr>
+      </thead>
+      <tbody id="cost-table-body"></tbody>
+    </table>
+  </div>
+
+</div>
+
+<div class="footer">
+  Aria Monitor · vLLM on DGX Spark · Refreshes every 1s
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Chart.js setup
+// ---------------------------------------------------------------------------
+const WINDOW_MS = 5 * 60 * 1000;
+const chartDefaults = {
+  responsive: true,
+  animation: { duration: 0 },
+  interaction: { intersect: false, mode: 'index' },
+  plugins: { legend: { display: true, labels: { color: '#8b949e', font: { size: 11 } } } },
+  scales: {
+    x: {
+      type: 'time', time: { unit: 'second', displayFormats: { second: 'HH:mm:ss' } },
+      ticks: { color: '#484f58', maxTicksLimit: 8 },
+      grid: { color: '#21262d' },
+    },
+    y: {
+      ticks: { color: '#484f58' },
+      grid: { color: '#21262d' },
+      beginAtZero: true,
+    },
+  },
+};
+
+function makeChart(id, datasets) {
+  const ctx = document.getElementById(id).getContext('2d');
+  return new Chart(ctx, {
+    type: 'line',
+    data: { datasets },
+    options: JSON.parse(JSON.stringify(chartDefaults)),
+  });
+}
+
+const chartThroughput = makeChart('chart-throughput', [
+  { label: 'Generation', data: [], borderColor: '#3fb950', backgroundColor: 'rgba(63,185,80,0.1)', fill: true, pointRadius: 0, borderWidth: 1.5 },
+  { label: 'Prompt', data: [], borderColor: '#58a6ff', backgroundColor: 'rgba(88,166,255,0.1)', fill: true, pointRadius: 0, borderWidth: 1.5 },
+]);
+const chartGpu = makeChart('chart-gpu', [
+  { label: 'GPU %', data: [], borderColor: '#bc8cff', backgroundColor: 'rgba(188,140,255,0.1)', fill: true, pointRadius: 0, borderWidth: 1.5 },
+  { label: 'Memory %', data: [], borderColor: '#d29922', backgroundColor: 'rgba(210,153,34,0.1)', fill: true, pointRadius: 0, borderWidth: 1.5 },
+]);
+const chartTemp = makeChart('chart-temp', [
+  { label: 'Temp °C', data: [], borderColor: '#f85149', backgroundColor: 'rgba(248,81,73,0.1)', fill: true, pointRadius: 0, borderWidth: 1.5 },
+]);
+const chartVram = makeChart('chart-vram', [
+  { label: 'VRAM Used', data: [], borderColor: '#58a6ff', backgroundColor: 'rgba(88,166,255,0.15)', fill: true, pointRadius: 0, borderWidth: 1.5 },
+]);
+
+// ---------------------------------------------------------------------------
+// Value hold mechanism for burst metrics
+// ---------------------------------------------------------------------------
+const holdValues = {};
+function holdValue(key, value, holdMs = 10000) {
+  const now = Date.now();
+  if (value > 0) {
+    holdValues[key] = { value, ts: now };
+    return value;
+  }
+  const held = holdValues[key];
+  if (held && (now - held.ts) < holdMs) return held.value;
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Formatting helpers
+// ---------------------------------------------------------------------------
+function fmt(n, decimals = 1) {
+  if (n === null || n === undefined || isNaN(n)) return '—';
+  if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return Number(n).toFixed(decimals);
+}
+function fmtMoney(n) {
+  if (n === null || isNaN(n)) return '—';
+  if (n >= 1000) return '$' + fmt(n, 0);
+  if (n >= 1) return '$' + n.toFixed(2);
+  if (n >= 0.01) return '$' + n.toFixed(3);
+  return '$' + n.toFixed(4);
+}
+function fmtUptime(s) {
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return d + 'd ' + h + 'h';
+  if (h > 0) return h + 'h ' + m + 'm';
+  return m + 'm';
+}
+
+// ---------------------------------------------------------------------------
+// Update loop
+// ---------------------------------------------------------------------------
+async function refresh() {
+  try {
+    const resp = await fetch('/api/status');
+    const data = await resp.json();
+    const d = data.instant || {};
+    const hourly = data.hourly || {};
+    const daily = data.daily || {};
+    const gpu = d.gpu || {};
+
+    // Status badge
+    const badge = document.getElementById('status-badge');
+    const statusText = document.getElementById('status-text');
+    if (d.busy) {
+      badge.className = 'badge badge-busy'; statusText.textContent = 'PROCESSING';
+    } else {
+      badge.className = 'badge badge-idle'; statusText.textContent = 'IDLE';
+    }
+
+    // Header info
+    document.getElementById('model-name').textContent = data.model || '—';
+    document.getElementById('uptime').textContent = 'Up ' + fmtUptime(data.uptime_s || 0);
+
+    // Metric cards
+    const genTps = holdValue('gen_tps', d.gen_tps || 0);
+    const promptTps = holdValue('prompt_tps', d.prompt_tps || 0);
+
+    document.getElementById('gen-tps').textContent = fmt(genTps);
+    document.getElementById('prompt-tps').textContent = fmt(promptTps);
+    document.getElementById('card-gen-tps').className = 'card' + (genTps > 0 ? ' active' : ' dim');
+    document.getElementById('card-prompt-tps').className = 'card' + (promptTps > 0 ? ' active' : ' dim');
+
+    document.getElementById('requests-running').textContent = d.requests_running || 0;
+    document.getElementById('requests-waiting-sub').textContent = (d.requests_waiting || 0) + ' waiting';
+    document.getElementById('card-requests').className = 'card' + ((d.requests_running || 0) > 0 ? ' active' : '');
+
+    const kvPct = ((d.kv_cache_usage || 0) * 100);
+    document.getElementById('kv-cache').textContent = kvPct.toFixed(1) + '%';
+    document.getElementById('card-kv-cache').className = 'card' + (kvPct > 80 ? ' warn' : '');
+
+    document.getElementById('total-requests').textContent = fmt(d.total_requests || 0, 0);
+    document.getElementById('req-24h-sub').textContent = fmt(daily.requests_24h || 0, 0) + ' in last 24h';
+
+    const specRate = ((d.spec_acceptance_rate || 0) * 100);
+    document.getElementById('spec-rate').textContent = specRate.toFixed(1) + '%';
+
+    const cacheRate = ((d.cache_hit_rate || 0) * 100);
+    document.getElementById('cache-rate').textContent = cacheRate.toFixed(1) + '%';
+
+    document.getElementById('gen-1h').textContent = fmt(hourly.avg_gen_tps_1h || 0);
+    document.getElementById('gen-1h-sub').textContent = (hourly.gen_samples_1h || 0) + ' active samples';
+
+    // Latency
+    document.getElementById('avg-ttft').textContent = d.avg_ttft_ms ? fmt(d.avg_ttft_ms, 0) : '—';
+    document.getElementById('avg-e2e').textContent = d.avg_e2e_s ? fmt(d.avg_e2e_s, 2) : '—';
+    document.getElementById('avg-itl').textContent = d.avg_itl_ms ? fmt(d.avg_itl_ms, 1) : '—';
+    document.getElementById('gpu-power').textContent = gpu.power_w ? fmt(gpu.power_w, 0) : '—';
+
+    // Savings banner
+    const costs = data.cost_savings || {};
+    const localCost = costs['Aria 27B (Local)'] || {};
+    const gptCost = costs['GPT-4o'] || {};
+    const claudeCost = costs['Claude Sonnet 4'] || {};
+    const bestSaving = Math.max(gptCost.total_cost || 0, claudeCost.total_cost || 0);
+    document.getElementById('savings-total').textContent = fmtMoney(bestSaving);
+    document.getElementById('savings-sub').textContent =
+      fmt(d.total_prompt_tokens || 0, 0) + ' prompt tokens · ' +
+      fmt(d.total_gen_tokens || 0, 0) + ' generation tokens';
+
+    // Compare boxes
+    const compareEl = document.getElementById('savings-compare');
+    const highlights = ['GPT-4o', 'Claude Sonnet 4', 'Gemini 2.5 Pro', 'GPT-4o-mini'];
+    compareEl.innerHTML = highlights.map(name => {
+      const c = costs[name] || {};
+      return `<div class="savings-model">
+        <div class="name">${name}</div>
+        <div class="cost" style="color:#d29922">${fmtMoney(c.total_cost || 0)}</div>
+      </div>`;
+    }).join('');
+
+    // Cost table
+    const tableBody = document.getElementById('cost-table-body');
+    const tableRows = Object.entries(costs).map(([name, c]) => {
+      const isLocal = name.includes('Local');
+      const saving = isLocal ? '—' : fmtMoney(c.total_cost);
+      return `<tr class="${isLocal ? 'local-row' : ''}">
+        <td class="model-name">${name}</td>
+        <td>${fmtMoney(c.input_cost)}</td>
+        <td>${fmtMoney(c.output_cost)}</td>
+        <td class="${isLocal ? '' : 'cost-cell'}">${fmtMoney(c.total_cost)}</td>
+        <td class="${isLocal ? 'savings-cell' : ''}">${isLocal ? 'FREE ✓' : saving}</td>
+      </tr>`;
+    });
+    tableBody.innerHTML = tableRows.join('');
+
+    // Charts — append new data point
+    const now = new Date();
+    const chartPoint = (chart, datasets) => {
+      datasets.forEach((val, i) => {
+        chart.data.datasets[i].data.push({ x: now, y: val });
+      });
+      // Sliding window
+      chart.options.scales.x.min = new Date(Date.now() - WINDOW_MS);
+      chart.options.scales.x.max = now;
+      chart.update('none');
+    };
+
+    chartPoint(chartThroughput, [genTps, promptTps]);
+    chartPoint(chartGpu, [gpu.gpu_util || 0, gpu.mem_util || 0]);
+    chartPoint(chartTemp, [gpu.temp || 0]);
+    chartPoint(chartVram, [gpu.vram_used_mb || 0]);
+
+    // Trim old data from chart datasets (keep 5 min)
+    [chartThroughput, chartGpu, chartTemp, chartVram].forEach(chart => {
+      chart.data.datasets.forEach(ds => {
+        while (ds.data.length > 0 && ds.data[0].x < new Date(Date.now() - WINDOW_MS - 5000)) {
+          ds.data.shift();
+        }
+      });
+    });
+
+  } catch (e) {
+    document.getElementById('status-badge').className = 'badge badge-offline';
+    document.getElementById('status-text').textContent = 'OFFLINE';
+  }
+}
+
+// Initial load + 1s refresh
+refresh();
+setInterval(refresh, 1000);
+</script>
+</body>
+</html>

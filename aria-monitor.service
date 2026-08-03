@@ -1,0 +1,20 @@
+[Unit]
+Description=Aria Monitor — vLLM Dashboard
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/repos/aria-monitor
+ExecStart=/usr/bin/python3 %h/repos/aria-monitor/monitor.py
+Restart=always
+RestartSec=5
+Environment=VLLM_HOST=localhost
+Environment=VLLM_PORT=8000
+Environment=MONITOR_PORT=8090
+Environment=GPU_INDEX=0
+Environment=POLL_INTERVAL=1
+Environment=MODEL_NAME=aria-27b
+Environment=MODEL_DISPLAY=Aria 27B (NVFP4)
+
+[Install]
+WantedBy=default.target

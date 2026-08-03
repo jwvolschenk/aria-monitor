@@ -1,0 +1,7 @@
+# Aria Monitor — ignore for codedb indexing
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.log
+.git/
