@@ -133,6 +133,7 @@
   <h1><span>Aria</span> Monitor</h1>
   <div class="header-right">
     <span id="model-name">—</span>
+    <span id="req-inline" style="color:#484f58">—</span>
     <span id="uptime">—</span>
     <span id="status-badge" class="badge badge-idle">
       <span class="badge-dot"></span> <span id="status-text">LOADING</span>
@@ -163,11 +164,6 @@
       <div class="card-label">Prompt Throughput</div>
       <div class="card-value" id="prompt-tps">0</div>
       <div class="card-sub">tokens/sec (instant)</div>
-    </div>
-    <div class="card" id="card-requests">
-      <div class="card-label">Active Requests</div>
-      <div class="card-value" id="requests-running">0</div>
-      <div class="card-sub" id="requests-waiting-sub">0 waiting</div>
     </div>
     <div class="card" id="card-kv-cache">
       <div class="card-label">KV Cache Usage</div>
@@ -385,9 +381,9 @@ async function refresh() {
     document.getElementById('card-gen-tps').className = 'card' + (genTps > 0 ? ' active' : ' dim');
     document.getElementById('card-prompt-tps').className = 'card' + (promptTps > 0 ? ' active' : ' dim');
 
-    document.getElementById('requests-running').textContent = d.requests_running || 0;
-    document.getElementById('requests-waiting-sub').textContent = (d.requests_waiting || 0) + ' waiting';
-    document.getElementById('card-requests').className = 'card' + ((d.requests_running || 0) > 0 ? ' active' : '');
+    const rr = d.requests_running || 0;
+    const rw = d.requests_waiting || 0;
+    document.getElementById('req-inline').textContent = rr > 0 ? rr + ' active' + (rw > 0 ? ' · ' + rw + ' queued' : '') : '';
 
     const kvPct = ((d.kv_cache_usage || 0) * 100);
     document.getElementById('kv-cache').textContent = kvPct.toFixed(1) + '%';
