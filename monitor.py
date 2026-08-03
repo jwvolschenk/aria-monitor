@@ -51,6 +51,7 @@ COST_TABLE: dict[str, dict[str, float]] = {
     "Aria 27B (Local)":    {"input": 0.0,   "output": 0.0, "cached_input": 0.0},
     "Claude Sonnet 5":     {"input": 2.00,  "output": 10.00, "cached_input": 0.20},
     "Claude Opus 5":       {"input": 5.00,  "output": 25.00, "cached_input": 0.50},
+    "Claude Fable 5":      {"input": 10.00, "output": 50.00, "cached_input": 1.00},
     "GPT-5.6 Sol":         {"input": 5.00,  "output": 30.00, "cached_input": 0.50},
     "GPT-5.6 Terra":       {"input": 2.50,  "output": 15.00, "cached_input": 0.25},
     "GPT-5.6 Luna":        {"input": 1.00,  "output": 6.00, "cached_input": 0.10},
