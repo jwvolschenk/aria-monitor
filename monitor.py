@@ -114,29 +114,41 @@ SUBSCRIPTION_LIMITS: dict[str, dict] = {
 }
 
 
-def compute_subscription_usage(total_prompt: int, total_gen: int, uptime_s: float) -> dict:
-    """Show what % of each subscription plan's limits the local usage would consume.
+def compute_subscription_usage(total_prompt: int, total_gen: int, uptime_s: float,
+                                hourly_gen_tps: float = 0, hourly_prompt_tps: float = 0,
+                                tokens_gen_24h: int = 0, tokens_prompt_24h: int = 0) -> dict:
+    """Show what % of each subscription plan's window limits the local usage would consume.
     
-    Compares actual tokens processed against the plan's token budget
-    (messages_per_window * tokens_per_msg extrapolated to uptime).
+    Subscription limits are rolling windows (3h or 5h). We calculate how many
+    tokens would accumulate in ONE window at the current throughput rate,
+    then compare against the plan's per-window token budget.
+    
+    Uses 24h rolling throughput if available, otherwise extrapolates from uptime.
     """
-    total_tokens = total_prompt + total_gen
-    results = {}
+    # Calculate tokens per hour
+    if uptime_s > 3600 and (tokens_gen_24h > 0 or tokens_prompt_24h > 0):
+        # Use 24h rolling data (most representative)
+        # Scale to 24h if we have less than 24h of data
+        scale = min(86400 / uptime_s, 1.0) if uptime_s < 86400 else 1.0
+        tokens_per_hour = ((tokens_prompt_24h + tokens_gen_24h) / (uptime_s / 3600)) * scale
+    elif uptime_s > 60:
+        # Extrapolate from uptime
+        total_tokens = total_prompt + total_gen
+        tokens_per_hour = total_tokens / (uptime_s / 3600)
+    else:
+        tokens_per_hour = 0
 
+    results = {}
     for plan_name, plan in SUBSCRIPTION_LIMITS.items():
         window_hours = plan["window_hours"]
         msgs = plan["messages_per_window"]
         tpm = plan["tokens_per_msg"]
         tokens_per_window = msgs * tpm
 
-        # How many windows fit in the uptime period
-        if uptime_s > 0 and window_hours > 0:
-            windows_elapsed = uptime_s / (window_hours * 3600)
-            total_budget = tokens_per_window * max(windows_elapsed, 1)
-        else:
-            total_budget = tokens_per_window
+        # Tokens that would accumulate in one window at current throughput
+        tokens_in_window = tokens_per_hour * window_hours
 
-        usage_pct = (total_tokens / total_budget * 100) if total_budget > 0 else 0
+        usage_pct = (tokens_in_window / tokens_per_window * 100) if tokens_per_window > 0 else 0
         breached = usage_pct > 100
 
         for model in plan["models"]:
@@ -149,7 +161,7 @@ def compute_subscription_usage(total_prompt: int, total_gen: int, uptime_s: floa
                 "window_hours": window_hours,
                 "messages_per_window": msgs,
                 "tokens_per_window": tokens_per_window,
-                "total_budget": round(total_budget),
+                "tokens_in_window": round(tokens_in_window),
                 "usage_pct": round(usage_pct, 1),
                 "breached": breached,
                 "total_cost": 0,  # subscription is flat fee, not per-token
@@ -612,13 +624,17 @@ class MonitorHandler(BaseHTTPRequestHandler):
         uptime_s = time.time() - start_time
         start_iso = datetime.fromtimestamp(start_time, tz=timezone.utc).strftime("%Y-%m-%d")
 
-        sub_usage = compute_subscription_usage(total_prompt, total_gen, uptime_s)
-
         # 24h cost savings
         daily_prompt = daily.get("tokens_prompt_24h", 0)
         daily_gen = daily.get("tokens_gen_24h", 0)
         cost_savings_24h = compute_cost_savings(daily_prompt, daily_gen, cache_hit_rate)
-        sub_usage_24h = compute_subscription_usage(daily_prompt, daily_gen, 86400)
+
+        sub_usage = compute_subscription_usage(
+            total_prompt, total_gen, uptime_s,
+            tokens_gen_24h=daily_gen, tokens_prompt_24h=daily_prompt)
+        sub_usage_24h = compute_subscription_usage(
+            daily_prompt, daily_gen, 86400,
+            tokens_gen_24h=daily_gen, tokens_prompt_24h=daily_prompt)
 
         # Electricity cost
         with lock:
