@@ -34,20 +34,26 @@ HISTORY_24H_MAX = int(os.environ.get("HISTORY_24H_MAX", "86400"))   # 24h @ 1s
 MODEL_NAME = os.environ.get("MODEL_NAME", "aria-27b")
 MODEL_DISPLAY = os.environ.get("MODEL_DISPLAY", "Aria 27B (NVFP4)")
 
+ZAR_PER_KWH = float(os.environ.get("ZAR_PER_KWH", "2"))  # SA electricity rate
+USD_TO_ZAR = float(os.environ.get("USD_TO_ZAR", "16.52"))  # exchange rate
+
 # Cost per 1M tokens — frontier model pricing (USD, as of August 2026)
 # Best-case pricing: using introductory/promotional rates where available.
+# Cache read rates included for fair comparison against local prefix caching.
 # Claude Sonnet 5: $2/$10 introductory through Aug 31 2026 (standard $3/$15)
 # Claude Opus 5: $5/$25
+# Claude cache read: 10% of base input
 # GPT-5.6 Sol: $5/$30 (flagship)
-# GPT-5.6 Terra: $2.50/$15 (balanced, competitive with GPT-5.5)
+# GPT-5.6 Terra: $2.50/$15 (balanced)
 # GPT-5.6 Luna: $1/$6 (fast, low-cost)
+# GPT-5.6 cache read: 90% off uncached input
 COST_TABLE: dict[str, dict[str, float]] = {
-    "Aria 27B (Local)":    {"input": 0.0,   "output": 0.0},
-    "Claude Sonnet 5":     {"input": 2.00,  "output": 10.00},
-    "Claude Opus 5":       {"input": 5.00,  "output": 25.00},
-    "GPT-5.6 Sol":         {"input": 5.00,  "output": 30.00},
-    "GPT-5.6 Terra":       {"input": 2.50,  "output": 15.00},
-    "GPT-5.6 Luna":        {"input": 1.00,  "output": 6.00},
+    "Aria 27B (Local)":    {"input": 0.0,   "output": 0.0, "cached_input": 0.0},
+    "Claude Sonnet 5":     {"input": 2.00,  "output": 10.00, "cached_input": 0.20},
+    "Claude Opus 5":       {"input": 5.00,  "output": 25.00, "cached_input": 0.50},
+    "GPT-5.6 Sol":         {"input": 5.00,  "output": 30.00, "cached_input": 0.50},
+    "GPT-5.6 Terra":       {"input": 2.50,  "output": 15.00, "cached_input": 0.25},
+    "GPT-5.6 Luna":        {"input": 1.00,  "output": 6.00, "cached_input": 0.10},
 }
 
 VLLM_URL = f"http://{VLLM_HOST}:{VLLM_PORT}/metrics"
@@ -281,12 +287,24 @@ def compute_delta(prev: Snapshot, curr: Snapshot) -> dict:
 # ---------------------------------------------------------------------------
 # Cost savings calculator
 # ---------------------------------------------------------------------------
-def compute_cost_savings(total_prompt: int, total_gen: int) -> dict:
-    """Compare local ($0) cost against frontier model pricing."""
+def compute_cost_savings(total_prompt: int, total_gen: int, cache_hit_rate: float = 0.0) -> dict:
+    """Compare local ($0) cost against frontier model pricing.
+    
+    Applies the same cache hit rate to frontier models for fair comparison.
+    If the local model has X% prefix cache hits, frontier models would also
+    benefit from their caching on the same workload.
+    """
     results = {}
     for model, prices in COST_TABLE.items():
-        input_cost = (total_prompt / 1_000_000) * prices["input"]
-        output_cost = (total_gen / 1_000_000) * prices["output"]
+        base_input = prices.get("input", 0.0)
+        cached_input = prices.get("cached_input", base_input)
+        output_price = prices.get("output", 0.0)
+
+        # Input cost: uncached portion at full rate + cached portion at cache rate
+        uncached_prompt = total_prompt * (1 - cache_hit_rate)
+        cached_prompt = total_prompt * cache_hit_rate
+        input_cost = (uncached_prompt / 1_000_000) * base_input + (cached_prompt / 1_000_000) * cached_input
+        output_cost = (total_gen / 1_000_000) * output_price
         total = input_cost + output_cost
         results[model] = {
             "input_cost": round(input_cost, 4),
@@ -308,6 +326,7 @@ latest_delta = {}
 latest_gpu = {}
 lock = threading.Lock()
 start_time = time.time()
+energy_wh_total = 0.0  # cumulative GPU energy in watt-hours
 
 
 def fetch_vllm_metrics() -> dict:
@@ -345,7 +364,15 @@ def collector_loop():
                 snap = Snapshot(metrics, gpu)
 
                 with lock:
+                    global energy_wh_total
                     latest_gpu = gpu
+
+                    # Accumulate GPU energy (watt-hours)
+                    if prev_snapshot is not None:
+                        dt_hours = (snap.ts - prev_snapshot.ts) / 3600.0
+                        power_w = gpu.get("power_w", 0)
+                        if power_w > 0:
+                            energy_wh_total += power_w * dt_hours
 
                     if prev_snapshot is not None:
                         delta = compute_delta(prev_snapshot, snap)
@@ -479,15 +506,38 @@ class MonitorHandler(BaseHTTPRequestHandler):
         total_prompt = delta.get("total_prompt_tokens", 0)
         total_gen = delta.get("total_gen_tokens", 0)
         total_requests = delta.get("total_requests", 0)
-        cost_savings = compute_cost_savings(total_prompt, total_gen)
+        cache_hit_rate = delta.get("cache_hit_rate", 0)
+        cost_savings = compute_cost_savings(total_prompt, total_gen, cache_hit_rate)
 
         # 24h cost savings
         daily_prompt = daily.get("tokens_prompt_24h", 0)
         daily_gen = daily.get("tokens_gen_24h", 0)
-        cost_savings_24h = compute_cost_savings(daily_prompt, daily_gen)
+        cost_savings_24h = compute_cost_savings(daily_prompt, daily_gen, cache_hit_rate)
 
         uptime_s = time.time() - start_time
         start_iso = datetime.fromtimestamp(start_time, tz=timezone.utc).strftime("%Y-%m-%d")
+
+        # Electricity cost
+        with lock:
+            wh_total = energy_wh_total
+        # Estimate 24h energy from current power draw * 24h (approximation)
+        # More accurate would be to track a 24h energy deque, but this is reasonable
+        power_now = gpu.get("power_w", 0)
+        wh_24h = daily.get("tokens_prompt_24h", 0)  # placeholder, use uptime ratio
+        # Use uptime-based ratio for 24h estimate
+        if uptime_s > 0:
+            wh_24h = wh_total * min(86400 / uptime_s, 1.0)
+
+        electricity = {
+            "zar_per_kwh": ZAR_PER_KWH,
+            "total_wh": round(wh_total, 2),
+            "total_kwh": round(wh_total / 1000, 4),
+            "total_cost_zar": round((wh_total / 1000) * ZAR_PER_KWH, 2),
+            "total_cost_usd": round(((wh_total / 1000) * ZAR_PER_KWH) / USD_TO_ZAR, 4),
+            "est_24h_wh": round(wh_24h, 2),
+            "est_24h_cost_zar": round((wh_24h / 1000) * ZAR_PER_KWH, 2),
+            "est_24h_cost_usd": round(((wh_24h / 1000) * ZAR_PER_KWH) / USD_TO_ZAR, 4),
+        }
 
         return {
             "now": time.time(),
@@ -501,6 +551,8 @@ class MonitorHandler(BaseHTTPRequestHandler):
             "daily": daily,
             "cost_savings": cost_savings,
             "cost_savings_24h": cost_savings_24h,
+            "cache_hit_rate": cache_hit_rate,
+            "electricity": electricity,
             "cost_table": COST_TABLE,
         }
 
