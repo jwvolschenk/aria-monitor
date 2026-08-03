@@ -130,20 +130,23 @@ def compute_subscription_usage(total_prompt: int, total_gen: int, uptime_s: floa
                                 weekly_reqs: int = 0, weekly_prompt: int = 0, weekly_gen: int = 0) -> dict:
     """Show what % of each subscription plan's weekly limits the local usage would consume.
     
-    Uses actual weekly counters (reset every Monday) for accurate comparison.
+    Compares by TOKEN VOLUME, not request count. Each plan's model has a
+    different tokens-per-message estimate. We divide our total weekly tokens
+    by that model's tokens-per-message to get equivalent messages, then
+    compare against the weekly message limit.
     """
-    avg_tokens_per_request = ((weekly_prompt + weekly_gen) / weekly_reqs) if weekly_reqs > 0 else 0
+    weekly_total_tokens = weekly_prompt + weekly_gen
 
     results = {}
     for plan_name, plan in SUBSCRIPTION_LIMITS.items():
-        window_hours = plan["window_hours"]
-
         for model_name, model_limits in plan["models"].items():
             weekly_limit = model_limits["weekly_msgs"]
             tpm = model_limits["tokens_per_msg"]
             weekly_token_budget = weekly_limit * tpm
 
-            usage_pct = (weekly_reqs / weekly_limit * 100) if weekly_limit > 0 else 0
+            # How many equivalent messages our tokens represent for this model
+            equivalent_msgs = weekly_total_tokens / tpm if tpm > 0 else 0
+            usage_pct = (equivalent_msgs / weekly_limit * 100) if weekly_limit > 0 else 0
             breached = usage_pct > 100
 
             key = f"{model_name} ({plan_name})"
@@ -152,16 +155,16 @@ def compute_subscription_usage(total_prompt: int, total_gen: int, uptime_s: floa
                 "model": model_name,
                 "provider": plan["provider"],
                 "price_monthly": plan["price_monthly"],
-                "window_hours": window_hours,
+                "window_hours": plan["window_hours"],
                 "weekly_msgs": weekly_limit,
                 "tokens_per_msg": tpm,
                 "weekly_token_budget": weekly_token_budget,
                 "weekly_reqs": weekly_reqs,
                 "weekly_prompt_tokens": weekly_prompt,
                 "weekly_gen_tokens": weekly_gen,
+                "equivalent_msgs": round(equivalent_msgs, 1),
                 "usage_pct": round(usage_pct, 1),
                 "breached": breached,
-                "avg_tokens_per_request": round(avg_tokens_per_request),
                 "total_cost": 0,
             }
     return results
@@ -450,6 +453,41 @@ weekly_requests = 0
 weekly_prompt_tokens = 0
 weekly_gen_tokens = 0
 
+# Persist weekly counters to survive restarts
+WEEKLY_STATE_FILE = os.path.join(os.path.dirname(__file__) or ".", "weekly_state.json")
+
+def save_weekly_state():
+    """Save weekly counters to disk."""
+    try:
+        state = {
+            "week_start": week_start_time,
+            "requests": weekly_requests,
+            "prompt_tokens": weekly_prompt_tokens,
+            "gen_tokens": weekly_gen_tokens,
+        }
+        with open(WEEKLY_STATE_FILE, "w") as f:
+            json.dump(state, f)
+    except Exception:
+        pass
+
+def load_weekly_state():
+    """Load weekly counters from disk if they match the current week."""
+    global weekly_requests, weekly_prompt_tokens, weekly_gen_tokens, week_start_time
+    try:
+        if os.path.exists(WEEKLY_STATE_FILE):
+            with open(WEEKLY_STATE_FILE) as f:
+                state = json.load(f)
+            # Only restore if the saved week matches current week
+            if abs(state.get("week_start", 0) - week_start_time) < 60:
+                weekly_requests = state.get("requests", 0)
+                weekly_prompt_tokens = state.get("prompt_tokens", 0)
+                weekly_gen_tokens = state.get("gen_tokens", 0)
+                print(f"[aria-monitor] Restored weekly state: {weekly_requests} reqs, {weekly_prompt_tokens} prompt, {weekly_gen_tokens} gen")
+    except Exception:
+        pass
+
+load_weekly_state()
+
 
 def fetch_vllm_metrics() -> dict:
     """Fetch and parse vLLM Prometheus metrics."""
@@ -515,6 +553,10 @@ def collector_loop():
                         weekly_requests += delta.get("requests_completed", 0)
                         weekly_prompt_tokens += delta.get("delta_prompt_tokens", 0)
                         weekly_gen_tokens += delta.get("delta_gen_tokens", 0)
+
+                        # Persist every 30 seconds
+                        if int(snap.ts) % 30 == 0:
+                            save_weekly_state()
                     else:
                         # First snapshot — seed with zeros
                         delta = {

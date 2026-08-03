@@ -603,7 +603,7 @@ function renderDashboard(data) {
           <td class="model-name">${c.plan}<br><span style="font-size:11px;color:#484f58">$${c.price_monthly}/mo</span></td>
           <td>${c.model}<br><span style="font-size:11px;color:#484f58">~${(c.tokens_per_msg||0).toLocaleString()} tok/msg</span></td>
           <td>${(c.weekly_msgs||0).toLocaleString()} msgs<br><span style="font-size:11px;color:#484f58">${(c.weekly_token_budget/1e6).toFixed(1)}M tok</span></td>
-          <td>${(c.weekly_reqs||0)} reqs<br><span style="font-size:11px;color:#484f58">${(weeklyTok/1000).toFixed(0)}K tok</span></td>
+          <td>${(c.weekly_reqs||0)} reqs<br><span style="font-size:11px;color:#484f58">${(weeklyTok/1000).toFixed(0)}K tok = ${(c.equivalent_msgs||0)} msgs</span></td>
           <td style="color:${pctColor};font-weight:600">${pct.toFixed(1)}%</td>
           <td style="color:${statusColor};font-weight:${breached ? '700' : '400'}">${statusText}</td>
         </tr>`);
