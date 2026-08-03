@@ -541,7 +541,7 @@ function renderDashboard(data) {
         <td>${cachedRate !== undefined ? fmtMoney(cachedRate) : '—'}</td>
         <td>${fmtMoney(prices.output || 0)}</td>
         <td class="cost-cell">${fmtMoney(c.total_cost)}</td>
-        <td>${saving > 0 ? fmtMoney(saving) : '—'}</td>
+        <td>—</td>
       </tr>`;
     });
     tableBody.innerHTML = tableRows.join('');
