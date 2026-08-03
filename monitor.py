@@ -111,14 +111,19 @@ def get_gpu_stats() -> dict:
             return {}
         parts = [p.strip() for p in result.stdout.strip().split(",")]
         if len(parts) >= 7:
+            def safe_float(s):
+                try:
+                    return float(s)
+                except (ValueError, TypeError):
+                    return 0.0
             return {
-                "temp": float(parts[0]),
-                "gpu_util": float(parts[1]),
-                "mem_util": float(parts[2]),
-                "vram_used_mb": float(parts[3]),
-                "vram_total_mb": float(parts[4]),
-                "power_w": float(parts[5]),
-                "power_limit_w": float(parts[6]),
+                "temp": safe_float(parts[0]),
+                "gpu_util": safe_float(parts[1]),
+                "mem_util": safe_float(parts[2]),
+                "vram_used_mb": safe_float(parts[3]),
+                "vram_total_mb": safe_float(parts[4]),
+                "power_w": safe_float(parts[5]),
+                "power_limit_w": safe_float(parts[6]),
             }
     except Exception:
         pass
