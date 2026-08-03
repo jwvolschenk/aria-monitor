@@ -497,11 +497,13 @@ function renderDashboard(data) {
       fmt(d.total_gen_tokens || 0, 0) + ' gen tokens' +
       (chr > 0 ? ' · ' + chr.toFixed(1) + '% cache hit rate applied' : '');
 
-    // Compare boxes — show top 3 most expensive frontier models
+    // Compare boxes — show top 3 most expensive frontier models dynamically
     const compareEl = document.getElementById('savings-compare');
-    const highlights = ['GPT-5.6 Sol', 'Claude Opus 5', 'Claude Sonnet 5'];
-    compareEl.innerHTML = highlights.map(name => {
-      const c = costs[name] || {};
+    const frontierCosts = Object.entries(costs)
+      .filter(([n]) => !n.includes('Local'))
+      .sort((a, b) => (b[1].total_cost || 0) - (a[1].total_cost || 0))
+      .slice(0, 3);
+    compareEl.innerHTML = frontierCosts.map(([name, c]) => {
       return `<div class="savings-model">
         <div class="name">${name}</div>
         <div class="cost" style="color:#d29922">${fmtMoney(c.total_cost || 0)}</div>
