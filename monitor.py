@@ -57,20 +57,19 @@ COST_TABLE: dict[str, dict[str, float]] = {
     "GPT-5.6 Luna":        {"input": 1.00,  "output": 6.00, "cached_input": 0.10},
 }
 
-# Subscription plan usage limits (estimated from published caps).
-# Each model within a plan has its own separate usage allowance.
-# Heavier models (Opus, Sol) consume more compute per message, so limits are lower.
-# Providers limit by messages, not tokens. We estimate tokens per message
-# to derive a token budget per rolling window, then show % consumed.
+# Subscription plan weekly usage limits (estimated from published caps).
+# Each model has its own separate allowance within a plan.
+# Weekly = messages_per_window × windows_per_day × 7 days
+# Heavier models get fewer messages per window.
 SUBSCRIPTION_LIMITS: dict[str, dict] = {
     "ChatGPT Plus ($20/mo)": {
         "provider": "OpenAI",
         "price_monthly": 20,
         "window_hours": 3,
         "models": {
-            "GPT-5.6 Sol":   {"messages": 80,  "tokens_per_msg": 800},   # flagship, tighter limit
-            "GPT-5.6 Terra": {"messages": 160, "tokens_per_msg": 500},   # balanced
-            "GPT-5.6 Luna":  {"messages": 300, "tokens_per_msg": 300},   # fast, generous
+            "GPT-5.6 Sol":   {"weekly_msgs": 4480,  "tokens_per_msg": 800},
+            "GPT-5.6 Terra": {"weekly_msgs": 8960,  "tokens_per_msg": 500},
+            "GPT-5.6 Luna":  {"weekly_msgs": 16800, "tokens_per_msg": 300},
         },
     },
     "ChatGPT Pro ($100/mo)": {
@@ -78,9 +77,9 @@ SUBSCRIPTION_LIMITS: dict[str, dict] = {
         "price_monthly": 100,
         "window_hours": 3,
         "models": {
-            "GPT-5.6 Sol":   {"messages": 400,  "tokens_per_msg": 800},
-            "GPT-5.6 Terra": {"messages": 800,  "tokens_per_msg": 500},
-            "GPT-5.6 Luna":  {"messages": 1500, "tokens_per_msg": 300},
+            "GPT-5.6 Sol":   {"weekly_msgs": 22400, "tokens_per_msg": 800},
+            "GPT-5.6 Terra": {"weekly_msgs": 44800, "tokens_per_msg": 500},
+            "GPT-5.6 Luna":  {"weekly_msgs": 84000, "tokens_per_msg": 300},
         },
     },
     "ChatGPT Pro ($200/mo)": {
@@ -88,9 +87,9 @@ SUBSCRIPTION_LIMITS: dict[str, dict] = {
         "price_monthly": 200,
         "window_hours": 3,
         "models": {
-            "GPT-5.6 Sol":   {"messages": 1600, "tokens_per_msg": 800},
-            "GPT-5.6 Terra": {"messages": 3200, "tokens_per_msg": 500},
-            "GPT-5.6 Luna":  {"messages": 6000, "tokens_per_msg": 300},
+            "GPT-5.6 Sol":   {"weekly_msgs": 89600,  "tokens_per_msg": 800},
+            "GPT-5.6 Terra": {"weekly_msgs": 179200, "tokens_per_msg": 500},
+            "GPT-5.6 Luna":  {"weekly_msgs": 336000, "tokens_per_msg": 300},
         },
     },
     "Claude Pro ($20/mo)": {
@@ -98,9 +97,9 @@ SUBSCRIPTION_LIMITS: dict[str, dict] = {
         "price_monthly": 20,
         "window_hours": 5,
         "models": {
-            "Claude Fable 5":  {"messages": 15,  "tokens_per_msg": 1500},  # heaviest, fewest
-            "Claude Opus 5":   {"messages": 30,  "tokens_per_msg": 1200},  # heavy reasoning
-            "Claude Sonnet 5": {"messages": 45,  "tokens_per_msg": 800},   # balanced
+            "Claude Fable 5":  {"weekly_msgs": 504,  "tokens_per_msg": 1500},
+            "Claude Opus 5":   {"weekly_msgs": 1008, "tokens_per_msg": 1200},
+            "Claude Sonnet 5": {"weekly_msgs": 1512, "tokens_per_msg": 800},
         },
     },
     "Claude Max ($100/mo)": {
@@ -108,9 +107,9 @@ SUBSCRIPTION_LIMITS: dict[str, dict] = {
         "price_monthly": 100,
         "window_hours": 5,
         "models": {
-            "Claude Fable 5":  {"messages": 75,  "tokens_per_msg": 1500},
-            "Claude Opus 5":   {"messages": 150, "tokens_per_msg": 1200},
-            "Claude Sonnet 5": {"messages": 225, "tokens_per_msg": 800},
+            "Claude Fable 5":  {"weekly_msgs": 2520, "tokens_per_msg": 1500},
+            "Claude Opus 5":   {"weekly_msgs": 5040, "tokens_per_msg": 1200},
+            "Claude Sonnet 5": {"weekly_msgs": 7560, "tokens_per_msg": 800},
         },
     },
     "Claude Max ($200/mo)": {
@@ -118,45 +117,33 @@ SUBSCRIPTION_LIMITS: dict[str, dict] = {
         "price_monthly": 200,
         "window_hours": 5,
         "models": {
-            "Claude Fable 5":  {"messages": 300, "tokens_per_msg": 1500},
-            "Claude Opus 5":   {"messages": 600, "tokens_per_msg": 1200},
-            "Claude Sonnet 5": {"messages": 900, "tokens_per_msg": 800},
+            "Claude Fable 5":  {"weekly_msgs": 10080, "tokens_per_msg": 1500},
+            "Claude Opus 5":   {"weekly_msgs": 20160, "tokens_per_msg": 1200},
+            "Claude Sonnet 5": {"weekly_msgs": 30240, "tokens_per_msg": 800},
         },
     },
 }
 
 
 def compute_subscription_usage(total_prompt: int, total_gen: int, uptime_s: float,
-                                hourly_gen_tps: float = 0, hourly_prompt_tps: float = 0,
-                                tokens_gen_24h: int = 0, tokens_prompt_24h: int = 0) -> dict:
-    """Show what % of each subscription plan's window limits the local usage would consume.
+                                total_requests: int = 0,
+                                weekly_reqs: int = 0, weekly_prompt: int = 0, weekly_gen: int = 0) -> dict:
+    """Show what % of each subscription plan's weekly limits the local usage would consume.
     
-    Subscription limits are rolling windows (3h or 5h). Each model has its own
-    separate allowance. We calculate how many tokens would accumulate in ONE
-    window at the current throughput rate, then compare against that model's
-    per-window token budget.
+    Uses actual weekly counters (reset every Monday) for accurate comparison.
     """
-    # Calculate tokens per hour
-    if uptime_s > 3600 and (tokens_gen_24h > 0 or tokens_prompt_24h > 0):
-        scale = min(86400 / uptime_s, 1.0) if uptime_s < 86400 else 1.0
-        tokens_per_hour = ((tokens_prompt_24h + tokens_gen_24h) / (uptime_s / 3600)) * scale
-    elif uptime_s > 60:
-        total_tokens = total_prompt + total_gen
-        tokens_per_hour = total_tokens / (uptime_s / 3600)
-    else:
-        tokens_per_hour = 0
+    avg_tokens_per_request = ((weekly_prompt + weekly_gen) / weekly_reqs) if weekly_reqs > 0 else 0
 
     results = {}
     for plan_name, plan in SUBSCRIPTION_LIMITS.items():
         window_hours = plan["window_hours"]
-        tokens_in_window = tokens_per_hour * window_hours
 
         for model_name, model_limits in plan["models"].items():
-            msgs = model_limits["messages"]
+            weekly_limit = model_limits["weekly_msgs"]
             tpm = model_limits["tokens_per_msg"]
-            tokens_per_window = msgs * tpm
+            weekly_token_budget = weekly_limit * tpm
 
-            usage_pct = (tokens_in_window / tokens_per_window * 100) if tokens_per_window > 0 else 0
+            usage_pct = (weekly_reqs / weekly_limit * 100) if weekly_limit > 0 else 0
             breached = usage_pct > 100
 
             key = f"{model_name} ({plan_name})"
@@ -166,12 +153,15 @@ def compute_subscription_usage(total_prompt: int, total_gen: int, uptime_s: floa
                 "provider": plan["provider"],
                 "price_monthly": plan["price_monthly"],
                 "window_hours": window_hours,
-                "messages_per_window": msgs,
+                "weekly_msgs": weekly_limit,
                 "tokens_per_msg": tpm,
-                "tokens_per_window": tokens_per_window,
-                "tokens_in_window": round(tokens_in_window),
+                "weekly_token_budget": weekly_token_budget,
+                "weekly_reqs": weekly_reqs,
+                "weekly_prompt_tokens": weekly_prompt,
+                "weekly_gen_tokens": weekly_gen,
                 "usage_pct": round(usage_pct, 1),
                 "breached": breached,
+                "avg_tokens_per_request": round(avg_tokens_per_request),
                 "total_cost": 0,
             }
     return results
@@ -448,6 +438,18 @@ lock = threading.Lock()
 start_time = time.time()
 energy_wh_total = 0.0  # cumulative GPU energy in watt-hours
 
+# Weekly counters — reset every Monday at midnight UTC
+def get_week_start():
+    """Get the most recent Monday 00:00 UTC as a timestamp."""
+    now = datetime.now(timezone.utc)
+    monday = now - __import__('datetime').timedelta(days=now.weekday())
+    return monday.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+week_start_time = get_week_start()
+weekly_requests = 0
+weekly_prompt_tokens = 0
+weekly_gen_tokens = 0
+
 
 def fetch_vllm_metrics() -> dict:
     """Fetch and parse vLLM Prometheus metrics."""
@@ -484,7 +486,7 @@ def collector_loop():
                 snap = Snapshot(metrics, gpu)
 
                 with lock:
-                    global energy_wh_total
+                    global energy_wh_total, weekly_requests, weekly_prompt_tokens, weekly_gen_tokens, week_start_time
                     latest_gpu = gpu
 
                     # Accumulate GPU energy (watt-hours)
@@ -494,12 +496,25 @@ def collector_loop():
                         if power_w > 0:
                             energy_wh_total += power_w * dt_hours
 
+                    # Reset weekly counters on Monday
+                    current_week_start = get_week_start()
+                    if current_week_start > week_start_time:
+                        week_start_time = current_week_start
+                        weekly_requests = 0
+                        weekly_prompt_tokens = 0
+                        weekly_gen_tokens = 0
+
                     if prev_snapshot is not None:
                         delta = compute_delta(prev_snapshot, snap)
                         latest_delta = delta
                         history.append(delta)
                         history_hour.append(delta)
                         history_24h.append(delta)
+
+                        # Increment weekly counters
+                        weekly_requests += delta.get("requests_completed", 0)
+                        weekly_prompt_tokens += delta.get("delta_prompt_tokens", 0)
+                        weekly_gen_tokens += delta.get("delta_gen_tokens", 0)
                     else:
                         # First snapshot — seed with zeros
                         delta = {
@@ -639,10 +654,16 @@ class MonitorHandler(BaseHTTPRequestHandler):
 
         sub_usage = compute_subscription_usage(
             total_prompt, total_gen, uptime_s,
-            tokens_gen_24h=daily_gen, tokens_prompt_24h=daily_prompt)
+            total_requests=total_requests,
+            weekly_reqs=weekly_requests,
+            weekly_prompt=weekly_prompt_tokens,
+            weekly_gen=weekly_gen_tokens)
         sub_usage_24h = compute_subscription_usage(
             daily_prompt, daily_gen, 86400,
-            tokens_gen_24h=daily_gen, tokens_prompt_24h=daily_prompt)
+            total_requests=daily.get("requests_24h", 0),
+            weekly_reqs=weekly_requests,
+            weekly_prompt=weekly_prompt_tokens,
+            weekly_gen=weekly_gen_tokens)
 
         # Electricity cost
         with lock:
