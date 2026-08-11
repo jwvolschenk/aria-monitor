@@ -97,6 +97,8 @@
   }
   .toggle-btn.active { background: var(--accent); color: #fff; }
   .toggle-btn:hover:not(.active) { background: var(--border); color: var(--text); }
+  .reset-btn { border: 1px solid var(--red); border-radius: 4px; color: var(--red); }
+  .reset-btn:hover { background: #3d1414 !important; color: #ff7b72 !important; }
   .cost-table { width: 100%; border-collapse: collapse; }
   .cost-table th {
     text-align: left; font-size: 11px; text-transform: uppercase;
@@ -146,6 +148,7 @@
       <option value="USD">$ USD</option>
       <option value="ZAR">R ZAR</option>
     </select>
+    <button id="reset-stats" class="toggle-btn reset-btn" type="button">Reset stats</button>
     <span id="status-badge" class="badge badge-idle">
       <span class="badge-dot"></span> <span id="status-text">LOADING</span>
     </span>
@@ -377,6 +380,22 @@ let lastData = null;  // cached for re-render on currency change
 document.getElementById('currency-select').addEventListener('change', (e) => {
   currentCurrency = e.target.value;
   if (lastData) renderDashboard(lastData);
+});
+
+document.getElementById('reset-stats').addEventListener('click', async () => {
+  if (!window.confirm('Reset all tracked usage statistics? This cannot be undone.')) return;
+  const button = document.getElementById('reset-stats');
+  button.disabled = true;
+  try {
+    const response = await fetch('/api/stats/reset', { method: 'POST' });
+    if (!response.ok) throw new Error('Reset failed');
+    Object.keys(holdValues).forEach(key => delete holdValues[key]);
+    await refresh();
+  } catch (error) {
+    window.alert('The statistics could not be reset. Please try again.');
+  } finally {
+    button.disabled = false;
+  }
 });
 
 function convertAmount(usd) {

@@ -440,6 +440,10 @@ latest_gpu = {}
 lock = threading.Lock()
 start_time = time.time()
 energy_wh_total = 0.0  # cumulative GPU energy in watt-hours
+total_requests = 0
+total_prompt_tokens = 0
+total_gen_tokens = 0
+stats_start_time = time.time()
 
 # Weekly counters — reset every Monday at midnight UTC
 def get_week_start():
@@ -453,40 +457,91 @@ weekly_requests = 0
 weekly_prompt_tokens = 0
 weekly_gen_tokens = 0
 
-# Persist weekly counters to survive restarts
-WEEKLY_STATE_FILE = os.path.join(os.path.dirname(__file__) or ".", "weekly_state.json")
+# Persist usage counters to survive monitor and host restarts.
+STATE_FILE = os.environ.get(
+    "STATE_FILE", os.path.join(os.path.dirname(__file__) or ".", "usage_state.json")
+)
+LEGACY_WEEKLY_STATE_FILE = os.path.join(os.path.dirname(__file__) or ".", "weekly_state.json")
+usage_state_loaded = os.path.exists(STATE_FILE)
 
-def save_weekly_state():
-    """Save weekly counters to disk."""
+def save_usage_state():
+    """Atomically save all user-facing cumulative counters to disk."""
     try:
         state = {
+            "version": 1,
+            "stats_start": stats_start_time,
+            "total_requests": total_requests,
+            "total_prompt_tokens": total_prompt_tokens,
+            "total_gen_tokens": total_gen_tokens,
+            "energy_wh_total": energy_wh_total,
             "week_start": week_start_time,
-            "requests": weekly_requests,
-            "prompt_tokens": weekly_prompt_tokens,
-            "gen_tokens": weekly_gen_tokens,
+            "weekly_requests": weekly_requests,
+            "weekly_prompt_tokens": weekly_prompt_tokens,
+            "weekly_gen_tokens": weekly_gen_tokens,
         }
-        with open(WEEKLY_STATE_FILE, "w") as f:
+        os.makedirs(os.path.dirname(STATE_FILE) or ".", exist_ok=True)
+        temporary_file = STATE_FILE + ".tmp"
+        with open(temporary_file, "w") as f:
             json.dump(state, f)
-    except Exception:
-        pass
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary_file, STATE_FILE)
+    except Exception as e:
+        print(f"[aria-monitor] Failed to save usage state: {e}", flush=True)
 
-def load_weekly_state():
-    """Load weekly counters from disk if they match the current week."""
+def load_usage_state():
+    """Restore cumulative counters, including the legacy weekly-only state."""
+    global total_requests, total_prompt_tokens, total_gen_tokens
+    global energy_wh_total, stats_start_time
     global weekly_requests, weekly_prompt_tokens, weekly_gen_tokens, week_start_time
     try:
-        if os.path.exists(WEEKLY_STATE_FILE):
-            with open(WEEKLY_STATE_FILE) as f:
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE) as f:
                 state = json.load(f)
-            # Only restore if the saved week matches current week
-            if abs(state.get("week_start", 0) - week_start_time) < 60:
-                weekly_requests = state.get("requests", 0)
-                weekly_prompt_tokens = state.get("prompt_tokens", 0)
-                weekly_gen_tokens = state.get("gen_tokens", 0)
-                print(f"[aria-monitor] Restored weekly state: {weekly_requests} reqs, {weekly_prompt_tokens} prompt, {weekly_gen_tokens} gen")
-    except Exception:
-        pass
+            stats_start_time = float(state.get("stats_start", stats_start_time))
+            total_requests = max(0, int(state.get("total_requests", 0)))
+            total_prompt_tokens = max(0, int(state.get("total_prompt_tokens", 0)))
+            total_gen_tokens = max(0, int(state.get("total_gen_tokens", 0)))
+            energy_wh_total = max(0.0, float(state.get("energy_wh_total", 0)))
+        elif os.path.exists(LEGACY_WEEKLY_STATE_FILE):
+            with open(LEGACY_WEEKLY_STATE_FILE) as f:
+                state = json.load(f)
+        else:
+            return
+        if abs(float(state.get("week_start", 0)) - week_start_time) < 60:
+            weekly_requests = max(0, int(state.get("weekly_requests", state.get("requests", 0))))
+            weekly_prompt_tokens = max(0, int(state.get("weekly_prompt_tokens", state.get("prompt_tokens", 0))))
+            weekly_gen_tokens = max(0, int(state.get("weekly_gen_tokens", state.get("gen_tokens", 0))))
+        print(f"[aria-monitor] Restored usage state: {total_requests} reqs, "
+              f"{total_prompt_tokens} prompt, {total_gen_tokens} gen")
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as e:
+        print(f"[aria-monitor] Failed to load usage state: {e}")
 
-load_weekly_state()
+load_usage_state()
+
+
+def reset_usage_state():
+    """Reset persisted usage totals and rolling histories."""
+    global total_requests, total_prompt_tokens, total_gen_tokens
+    global energy_wh_total, stats_start_time, week_start_time
+    global weekly_requests, weekly_prompt_tokens, weekly_gen_tokens
+    global latest_delta
+    with lock:
+        total_requests = total_prompt_tokens = total_gen_tokens = 0
+        weekly_requests = weekly_prompt_tokens = weekly_gen_tokens = 0
+        energy_wh_total = 0.0
+        stats_start_time = time.time()
+        week_start_time = get_week_start()
+        history.clear()
+        history_hour.clear()
+        history_24h.clear()
+        latest_delta = dict(latest_delta)
+        latest_delta.update({
+            "total_requests": 0,
+            "total_prompt_tokens": 0,
+            "total_gen_tokens": 0,
+        })
+        save_usage_state()
 
 
 def fetch_vllm_metrics() -> dict:
@@ -524,7 +579,8 @@ def collector_loop():
                 snap = Snapshot(metrics, gpu)
 
                 with lock:
-                    global energy_wh_total, weekly_requests, weekly_prompt_tokens, weekly_gen_tokens, week_start_time
+                    global energy_wh_total, total_requests, total_prompt_tokens, total_gen_tokens
+                    global weekly_requests, weekly_prompt_tokens, weekly_gen_tokens, week_start_time
                     latest_gpu = gpu
 
                     # Accumulate GPU energy (watt-hours)
@@ -550,15 +606,34 @@ def collector_loop():
                         history_24h.append(delta)
 
                         # Increment weekly counters
-                        weekly_requests += delta.get("requests_completed", 0)
-                        weekly_prompt_tokens += delta.get("delta_prompt_tokens", 0)
-                        weekly_gen_tokens += delta.get("delta_gen_tokens", 0)
+                        requests_delta = max(0, int(delta.get("requests_completed", 0)))
+                        prompt_delta = max(0, int(delta.get("delta_prompt_tokens", 0)))
+                        gen_delta = max(0, int(delta.get("delta_gen_tokens", 0)))
+                        total_requests += requests_delta
+                        total_prompt_tokens += prompt_delta
+                        total_gen_tokens += gen_delta
+                        weekly_requests += requests_delta
+                        weekly_prompt_tokens += prompt_delta
+                        weekly_gen_tokens += gen_delta
+                        delta["total_prompt_tokens"] = total_prompt_tokens
+                        delta["total_gen_tokens"] = total_gen_tokens
+                        delta["total_requests"] = total_requests
 
-                        # Persist every 30 seconds
-                        if int(snap.ts) % 30 == 0:
-                            save_weekly_state()
+                        # The file is small; saving each sample minimizes loss
+                        # on an ungraceful reboot or power interruption.
+                        save_usage_state()
                     else:
-                        # First snapshot — seed with zeros
+                        # On the first upgrade, preserve the vLLM totals users
+                        # already saw. Once our state file exists, never seed
+                        # them again or a monitor restart would double-count.
+                        if not usage_state_loaded:
+                            total_prompt_tokens = max(0, int(snap.prompt_tokens))
+                            total_gen_tokens = max(0, int(snap.generation_tokens))
+                            total_requests = max(0, int(
+                                snap.request_success_stop + snap.request_success_error
+                                + snap.request_success_abort + snap.request_success_length
+                            ))
+                            save_usage_state()
                         delta = {
                             "ts": snap.ts, "dt": 0,
                             "delta_prompt_tokens": 0, "delta_gen_tokens": 0,
@@ -567,9 +642,9 @@ def collector_loop():
                             "requests_waiting": snap.requests_waiting,
                             "kv_cache_usage": snap.kv_cache_usage,
                             "requests_completed": 0, "busy": False,
-                            "total_prompt_tokens": snap.prompt_tokens,
-                            "total_gen_tokens": snap.generation_tokens,
-                            "total_requests": 0,
+                            "total_prompt_tokens": total_prompt_tokens,
+                            "total_gen_tokens": total_gen_tokens,
+                            "total_requests": total_requests,
                             "avg_ttft_ms": 0, "avg_e2e_s": 0, "avg_itl_ms": 0,
                             "spec_acceptance_rate": 0, "spec_drafts_total": 0,
                             "cache_hit_rate": 0,
@@ -650,6 +725,13 @@ class MonitorHandler(BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
+    def do_POST(self):
+        if self.path == "/api/stats/reset":
+            reset_usage_state()
+            self._serve_json({"ok": True, "stats_start": stats_start_time})
+        else:
+            self.send_error(404)
+
     def _serve_html(self):
         html_path = os.path.join(os.path.dirname(__file__) or ".", "dashboard.html")
         try:
@@ -687,7 +769,7 @@ class MonitorHandler(BaseHTTPRequestHandler):
         cost_savings = compute_cost_savings(total_prompt, total_gen, cache_hit_rate)
 
         uptime_s = time.time() - start_time
-        start_iso = datetime.fromtimestamp(start_time, tz=timezone.utc).strftime("%Y-%m-%d")
+        start_iso = datetime.fromtimestamp(stats_start_time, tz=timezone.utc).strftime("%Y-%m-%d")
 
         # 24h cost savings
         daily_prompt = daily.get("tokens_prompt_24h", 0)
@@ -774,6 +856,8 @@ def main():
         server.serve_forever()
     except KeyboardInterrupt:
         print("\n[aria-monitor] Shutting down.")
+        with lock:
+            save_usage_state()
         server.shutdown()
 
 
