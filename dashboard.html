@@ -578,11 +578,12 @@ function renderDashboard(data) {
 
     if (pricingMode === 'subscription') {
       headerRow.innerHTML = '<th>PLAN</th><th>MODEL</th><th>WEEKLY LIMIT</th><th>USAGE</th><th>USAGE %</th><th>STATUS</th>';
+      const weeklyLocalRequests = Object.values(data.subscription_usage || {})[0]?.weekly_reqs || 0;
       tableRows[0] = `<tr class="local-row">
         <td class="model-name">Aria 27B (Local)</td>
         <td>—</td>
         <td>Unlimited</td>
-        <td>${(data.instant?.total_requests||0).toLocaleString()} reqs</td>
+        <td>${weeklyLocalRequests.toLocaleString()} reqs<br><span style="font-size:11px;color:#484f58">since Monday</span></td>
         <td style="color:#3fb950">0%</td>
         <td style="color:#3fb950">✓ Uncapped</td>
       </tr>`;
@@ -593,13 +594,12 @@ function renderDashboard(data) {
         const pctColor = breached ? '#f85149' : pct > 80 ? '#d29922' : '#3fb950';
         const statusText = breached ? '⚠ LIMIT EXCEEDED' : pct > 80 ? 'Near limit' : 'OK';
         const statusColor = breached ? '#f85149' : pct > 80 ? '#d29922' : '#8b949e';
-        const weeklyTok = ((c.weekly_prompt_tokens||0) + (c.weekly_gen_tokens||0));
 
         tableRows.push(`<tr style="${breached ? 'background:rgba(248,81,73,0.08)' : ''}">
           <td class="model-name">${c.plan}<br><span style="font-size:11px;color:#484f58">$${c.price_monthly}/mo</span></td>
           <td>${c.model}<br><span style="font-size:11px;color:#484f58">~${(c.tokens_per_msg||0).toLocaleString()} tok/msg</span></td>
           <td>${(c.weekly_msgs||0).toLocaleString()} msgs<br><span style="font-size:11px;color:#484f58">${(c.weekly_token_budget/1e6).toFixed(1)}M tok</span></td>
-          <td>${(c.weekly_reqs||0)} reqs<br><span style="font-size:11px;color:#484f58">${(weeklyTok/1000).toFixed(0)}K tok = ${(c.equivalent_msgs||0)} msgs</span></td>
+          <td>${Math.round(c.equivalent_msgs || 0).toLocaleString()} msgs</td>
           <td style="color:${pctColor};font-weight:600">${pct.toFixed(1)}%</td>
           <td style="color:${statusColor};font-weight:${breached ? '700' : '400'}">${statusText}</td>
         </tr>`);
